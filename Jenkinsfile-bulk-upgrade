@@ -1,6 +1,6 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
-import org.jenkinsci.plugins.workflow.cps.NonCPS
+import com.cloudbees.groovy.cps.NonCPS
 
 
 def environmentChoices = [
