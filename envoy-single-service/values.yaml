@@ -1,0 +1,38 @@
+
+env: ""
+
+group: ""
+
+microservice: ""
+
+pathPrefix: ""
+
+svc: ""
+
+backendTrafficPolicy:
+  create: false
+  cookie:
+    name: session-{{ .Values.microservice }}
+    ttl: 30m
+    sameSite: Lax
+
+timeouts:
+  request: 60s
+
+gateway:
+  create: false
+  name: ""
+  namespace: common-gw-{{ .Values.env }}
+  gatewayClassName: envoy-gateway
+  listenerName: https
+  port: 443
+  allowedRoutesFrom: All
+  tlsSecretName: ""
+
+backend:
+  port: 443
+  tlsEnabled: true
+  caSecretName: ""
+  hostname: "*"
+
+

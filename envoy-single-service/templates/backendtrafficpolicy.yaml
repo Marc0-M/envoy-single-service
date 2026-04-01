@@ -1,0 +1,23 @@
+{{- if .Values.backendTrafficPolicy.create }}
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: {{ include "envoy-single-service.backendTrafficPolicyName" . }}
+  namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+  labels:
+    {{- include "envoy-single-service.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ include "envoy-single-service.httpRouteName" . }}
+  loadBalancer:
+    type: ConsistentHash
+    consistentHash:
+      type: Cookie
+      cookie:
+        name: {{ tpl .Values.backendTrafficPolicy.cookie.name . | quote }}
+        ttl: {{ .Values.backendTrafficPolicy.cookie.ttl | quote }}
+        attributes:
+          SameSite: {{ .Values.backendTrafficPolicy.cookie.sameSite | quote }}
+{{- end }}

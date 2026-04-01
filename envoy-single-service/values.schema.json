@@ -1,0 +1,99 @@
+{
+  "$schema": "http://json-schema.org/schema#",
+  "type": "object",
+  "required": [
+    "microservice",
+    "group",
+    "env",
+    "gateway",
+    "backend"
+  ],
+  "properties": {
+    "microservice": {
+      "type": "string",
+      "minLength": 1
+    },
+    "group": {
+      "type": "string",
+      "minLength": 1
+    },
+    "env": {
+      "type": "string",
+      "enum": [
+        "dev",
+        "devb",
+        "devc",
+        "intg",
+        "intgb",
+        "intgc",
+        "accp",
+        "accpb",
+        "accpc",
+        "proda",
+        "prodb"
+      ]
+    },
+    "backendTrafficPolicy": {
+      "type": "object",
+      "properties": {
+        "create": {
+          "type": "boolean"
+        },
+        "cookie": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "ttl": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sameSite": {
+              "type": "string",
+              "enum": [
+                "Strict",
+                "Lax",
+                "None"
+              ]
+            }
+          }
+        }
+      }
+    },
+    "timeouts": {
+      "type": "object",
+      "properties": {
+        "request": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "gateway": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "backend": {
+      "type": "object",
+      "required": [
+        "caSecretName"
+      ],
+      "properties": {
+        "caSecretName": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

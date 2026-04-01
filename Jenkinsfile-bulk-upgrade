@@ -1,0 +1,318 @@
+import groovy.json.JsonOutput
+import groovy.json.JsonSlurperClassic
+
+
+def environmentChoices = [
+  'Select_one',
+  'dev',
+  'devb',
+  'devc',
+  'intg',
+  'intgb',
+  'intgc',
+  'accp',
+  'accpb',
+  'accpc',
+  'proda',
+  'prodb',
+]
+
+boolean isProdEnv(String targetEnv) {
+  String normalizedEnv = targetEnv?.toLowerCase() ?: ''
+  return normalizedEnv ==~ /prod[a-z]*[a-z]?/ || normalizedEnv == 'dr'
+}
+
+boolean isAccpEnv(String targetEnv) {
+  String normalizedEnv = targetEnv?.toLowerCase() ?: ''
+  return normalizedEnv == 'accp' || normalizedEnv.startsWith('accp')
+}
+
+boolean isIntgEnv(String targetEnv) {
+  String normalizedEnv = targetEnv?.toLowerCase() ?: ''
+  return normalizedEnv == 'intg' || normalizedEnv.startsWith('intg')
+}
+
+boolean isDevEnv(String targetEnv) {
+  String normalizedEnv = targetEnv?.toLowerCase() ?: ''
+  return normalizedEnv == 'dev' || normalizedEnv.startsWith('dev')
+}
+
+String getRegion(String targetEnv) {
+  return (targetEnv?.toLowerCase() == 'dr') ? 'us-west-2' : 'us-east-1'
+}
+
+String getKubeConfig(String targetEnv) {
+  if (isProdEnv(targetEnv)) {
+    return 'prod'
+  }
+  if (isAccpEnv(targetEnv)) {
+    return 'accp'
+  }
+  if (isIntgEnv(targetEnv)) {
+    return 'intg'
+  }
+  if (isDevEnv(targetEnv)) {
+    return 'dev'
+  }
+  return targetEnv
+}
+
+String getCredentialId(String targetEnv) {
+  if (isProdEnv(targetEnv)) {
+    return 'sa_deploy_prod'
+  }
+  if (isAccpEnv(targetEnv)) {
+    return 'sa_deploy_accp'
+  }
+  if (isIntgEnv(targetEnv)) {
+    return 'sa_deploy_intg'
+  }
+  if (isDevEnv(targetEnv)) {
+    return 'sa_deploy_dev'
+  }
+  return 'sa_deploy_null'
+}
+
+String shellQuote(String value) {
+  return "'${(value ?: '').replace("'", "'\"'\"'")}'"
+}
+
+String sanitizeReleaseFilter(String rawValue) {
+  return rawValue?.trim() ?: ''
+}
+
+String buildHelmUpgradeCommand(Map release, String chartRef, String chartVersion, String kubeContext, boolean dryRun) {
+  List<String> command = [
+    "helm upgrade ${shellQuote(release.name.toString())}",
+    shellQuote(chartRef),
+    "--kube-context ${shellQuote(kubeContext)}",
+    "--namespace ${shellQuote(release.namespace.toString())}",
+    "--version ${shellQuote(chartVersion)}",
+    '--reuse-values',
+    '--history-max 10',
+  ]
+
+  if (dryRun) {
+    command << '--dry-run'
+    command << '--debug'
+  }
+
+  return command.join(" \\\n  ")
+}
+
+properties([
+  parameters([
+    string(
+      name: 'NODE_LABEL',
+      defaultValue: 'rhel8-eks-deploy-openjdk11-17-hlm',
+      description: 'Jenkins agent to host all stages.'
+    ),
+    choice(
+      name: 'ENV',
+      choices: environmentChoices.join('\n'),
+      description: 'Target cluster/environment to scan for installed envoy-single-service releases.'
+    ),
+    string(
+      name: 'CHART_VERSION',
+      defaultValue: '0.1.0',
+      description: 'OCI chart version to upgrade every discovered envoy-single-service release to.'
+    ),
+    string(
+      name: 'RELEASE_FILTER',
+      defaultValue: '',
+      description: 'Optional regex to limit which discovered Helm release names are processed.'
+    ),
+    booleanParam(
+      name: 'VALIDATE_ONLY',
+      defaultValue: false,
+      description: 'Run helm upgrade --dry-run for every discovered release without applying changes.'
+    ),
+  ])
+])
+
+pipeline {
+  agent {
+    node {
+      label "${params.NODE_LABEL ?: 'rhel8-eks-deploy-openjdk11-17-hlm'}"
+    }
+  }
+
+  options {
+    disableConcurrentBuilds()
+    skipDefaultCheckout()
+    timestamps()
+  }
+
+  environment {
+    ARTIFACTORY_HOST = 'artifactory.tools.vaapps.net'
+    ARTIFACTORY_CREDENTIALS_ID = 'f06cf8c1-1b3c-44e0-bc68-35e0f8a1a6fa'
+    CHART_REF = 'oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service'
+  }
+
+  stages {
+    stage('Resolve Target Cluster') {
+      steps {
+        script {
+          if (!params.ENV?.trim() || params.ENV == 'Select_one') {
+            error('ENV is required.')
+          }
+
+          env.REGION = getRegion(params.ENV)
+          env.KUBE_CONTEXT = getKubeConfig(params.ENV)
+          env.CRED_ID = getCredentialId(params.ENV)
+          env.RELEASE_FILTER_SANITIZED = sanitizeReleaseFilter(params.RELEASE_FILTER)
+
+          if (env.CRED_ID == 'sa_deploy_null') {
+            error("No AWS deployment credential mapping found for environment '${params.ENV}'.")
+          }
+
+          currentBuild.displayName = "${params.ENV}-bulk-envoy-${params.CHART_VERSION}-#${currentBuild.number}"
+
+          echo "Environment: ${params.ENV}"
+          echo "Region: ${env.REGION}"
+          echo "Kube context: ${env.KUBE_CONTEXT}"
+          echo "AWS credential ID: ${env.CRED_ID}"
+          echo "Chart version: ${params.CHART_VERSION}"
+          echo "Release filter: ${env.RELEASE_FILTER_SANITIZED ?: '<all releases>'}"
+          echo "Validate only: ${params.VALIDATE_ONLY}"
+        }
+      }
+    }
+
+    stage('Discover And Upgrade Releases') {
+      steps {
+        withCredentials([
+          [
+            $class: 'AmazonWebServicesCredentialsBinding',
+            accessKeyVariable: 'AWS_ACCESS_KEY_ID',
+            credentialsId: env.CRED_ID,
+            secretKeyVariable: 'AWS_SECRET_ACCESS_KEY'
+          ],
+          usernamePassword(
+            credentialsId: env.ARTIFACTORY_CREDENTIALS_ID,
+            usernameVariable: 'USERNAME',
+            passwordVariable: 'PASSWORD'
+          )
+        ]) {
+          withEnv([
+            "AWS_DEFAULT_REGION=${env.REGION}",
+            "AWS_REGION=${env.REGION}",
+            "ORIGINAL_KUBECONFIG=${env.KUBECONFIG ?: ''}",
+            "KUBECONFIG=${env.WORKSPACE}/.kube-bulk-upgrade/config",
+            "HELM_CONFIG_HOME=${env.WORKSPACE}/.helm-bulk-upgrade",
+            "HELM_CACHE_HOME=${env.WORKSPACE}/.helm-bulk-upgrade/cache",
+            "HELM_DATA_HOME=${env.WORKSPACE}/.helm-bulk-upgrade/data",
+            "HELM_REGISTRY_CONFIG=${env.WORKSPACE}/.helm-bulk-upgrade/registry/config.json",
+            'HELM_EXPERIMENTAL_OCI=1'
+          ]) {
+            sh '''
+              set +x
+              mkdir -p "$(dirname "$KUBECONFIG")"
+              mkdir -p "$HELM_CONFIG_HOME/registry" "$HELM_CACHE_HOME" "$HELM_DATA_HOME"
+              if [ -n "$ORIGINAL_KUBECONFIG" ]; then
+                KUBECONFIG="$ORIGINAL_KUBECONFIG" kubectl config view --raw > "$KUBECONFIG"
+              else
+                env -u KUBECONFIG kubectl config view --raw > "$KUBECONFIG"
+              fi
+              sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' "$KUBECONFIG"
+              printf '%s' "$PASSWORD" | helm registry login "$ARTIFACTORY_HOST" \
+                --username "$USERNAME" \
+                --password-stdin
+              set -x
+
+              helm show chart "$CHART_REF" --version "$CHART_VERSION"
+            '''
+
+            script {
+              def helmListJson = sh(
+                returnStdout: true,
+                script: """
+                  helm list \
+                    --kube-context ${shellQuote(env.KUBE_CONTEXT)} \
+                    -A \
+                    -o json
+                """
+              ).trim()
+
+              def discovered = helmListJson ? new JsonSlurperClassic().parseText(helmListJson) : []
+              def releaseFilter = env.RELEASE_FILTER_SANITIZED ?: ''
+              def releases = discovered.findAll { item ->
+                String chartName = item.chart?.toString() ?: ''
+                String releaseName = item.name?.toString() ?: ''
+                chartName.startsWith('envoy-single-service-') && (!releaseFilter || (releaseName ==~ releaseFilter))
+              }.collect { item ->
+                [
+                  name: item.name?.toString(),
+                  namespace: item.namespace?.toString(),
+                  chart: item.chart?.toString(),
+                  status: item.status?.toString(),
+                  revision: item.revision?.toString(),
+                ]
+              }
+
+              if (releases.isEmpty()) {
+                String suffix = releaseFilter ? " matching regex '${releaseFilter}'" : ''
+                error("No installed envoy-single-service releases were found in kube context '${env.KUBE_CONTEXT}'${suffix}.")
+              }
+
+              env.DISCOVERED_RELEASES_JSON = JsonOutput.toJson(releases)
+              writeFile file: 'discovered-envoy-single-service-releases.json', text: JsonOutput.prettyPrint(env.DISCOVERED_RELEASES_JSON)
+              archiveArtifacts artifacts: 'discovered-envoy-single-service-releases.json', onlyIfSuccessful: false
+
+              echo "Discovered ${releases.size()} envoy-single-service releases:"
+              releases.each { release ->
+                echo "- ${release.namespace}/${release.name} (chart=${release.chart}, status=${release.status}, revision=${release.revision})"
+              }
+
+              def runPass = { boolean dryRun, String label ->
+                def failures = []
+
+                releases.each { release ->
+                  String command = buildHelmUpgradeCommand(release, env.CHART_REF, params.CHART_VERSION, env.KUBE_CONTEXT, dryRun)
+                  echo "${label}: ${release.namespace}/${release.name}"
+
+                  try {
+                    sh command
+                  } catch (err) {
+                    failures << [
+                      release: release.name,
+                      namespace: release.namespace,
+                      action: label,
+                      message: err.toString(),
+                    ]
+                    echo "${label} failed for ${release.namespace}/${release.name}: ${err}"
+                  }
+                }
+
+                if (!failures.isEmpty()) {
+                  String fileName = dryRun ? 'bulk-upgrade-validation-failures.json' : 'bulk-upgrade-apply-failures.json'
+                  writeFile file: fileName, text: JsonOutput.prettyPrint(JsonOutput.toJson(failures))
+                  archiveArtifacts artifacts: fileName, onlyIfSuccessful: false
+                  error("${label} failed for ${failures.size()} release(s). See ${fileName} for details.")
+                }
+              }
+
+              runPass(true, 'Validating upgrade')
+
+              if (params.VALIDATE_ONLY) {
+                echo 'Validated all discovered envoy-single-service releases successfully. No upgrades were applied.'
+              } else {
+                runPass(false, 'Upgrading release')
+                echo 'Upgraded all discovered envoy-single-service releases successfully.'
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  post {
+    always {
+      sh '''
+        rm -rf "$WORKSPACE/.helm-bulk-upgrade"
+        rm -rf "$WORKSPACE/.kube-bulk-upgrade"
+      '''
+    }
+  }
+}

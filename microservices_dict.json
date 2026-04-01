@@ -1,0 +1,312 @@
+[
+  {
+    "microservicesGroup": "annuity-services",
+    "microservices": [
+      {
+        "microserviceName": "annuity-agent-api",
+        "serviceName": "service-annuity-agent-api",
+        "pathPrefix": "/annuity-agent-api"
+      },
+      {
+        "microserviceName": "annuity-contract-entity-api",
+        "serviceName": "service-annuity-contract-entity-api",
+        "pathPrefix": "/annuity-contract-entity-api"
+      },
+      {
+        "microserviceName": "annuity-contract-financial-api",
+        "serviceName": "service-annuity-contract-financial-api",
+        "pathPrefix": "/annuity-contract-financial-api"
+      },
+      {
+        "microserviceName": "annuity-contract-info-api",
+        "serviceName": "service-annuity-contract-info-api",
+        "pathPrefix": "/annuity-contract-info-api"
+      },
+      {
+        "microserviceName": "annuity-entity-api",
+        "serviceName": "service-annuity-entity-api",
+        "pathPrefix": "/annuity-entity-api"
+      },
+      {
+        "microserviceName": "annuity-utility-services",
+        "serviceName": "service-annuity-utility-services",
+        "pathPrefix": "/annuity-utility-services"
+      },
+      {
+        "microserviceName": "annuity-webtransdb-api",
+        "serviceName": "service-annuity-webtransdb-api",
+        "pathPrefix": "/annuity-webtransdb-api"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "digtran-services",
+    "microservices": [
+      {
+        "microserviceName": "admin-common-services",
+        "serviceName": "service-admin-common-services",
+        "pathPrefix": "/admin-common-services"
+      },
+      {
+        "microserviceName": "claims-services",
+        "serviceName": "service-claims-services",
+        "pathPrefix": "/claims-services"
+      },
+      {
+        "microserviceName": "customer-entity-services",
+        "serviceName": "service-customer-entity-services",
+        "pathPrefix": "/customer-entity-services"
+      },
+      {
+        "microserviceName": "newgen-services",
+        "serviceName": "service-newgen-services",
+        "pathPrefix": "/newgen-services"
+      },
+      {
+        "microserviceName": "tax-services",
+        "serviceName": "service-tax-services",
+        "pathPrefix": "/tax-services"
+      },
+      {
+        "microserviceName": "transaction-data-services",
+        "serviceName": "service-transaction-data-services",
+        "pathPrefix": "/transaction-services"
+      },
+      {
+        "microserviceName": "transaction-orchestrator-services",
+        "serviceName": "service-transaction-orchestrator-services",
+        "pathPrefix": "/transaction-orchestrator"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "document-services",
+    "microservices": [
+      {
+        "microserviceName": "ultradoc-services",
+        "serviceName": "service-ultradoc-services",
+        "pathPrefix": "/ultradoc-services"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "garwin-int-apps",
+    "microservices": [
+      {
+        "microserviceName": "garwin-annuity-admin-app",
+        "serviceName": "service-garwin-annuity-admin-app",
+        "pathPrefix": "/grwn-annuity-admin-app"
+      },
+      {
+        "microserviceName": "garwin-jmt-app",
+        "serviceName": "service-garwin-jmt-app",
+        "pathPrefix": "/grwn-jmt-app"
+      },
+      {
+        "microserviceName": "nscc-configurator-app",
+        "serviceName": "service-nscc-configurator-app",
+        "pathPrefix": "/nscc-configurator-app"
+      },
+      {
+        "microserviceName": "basdashboard",
+        "serviceName": "service-basdashboard",
+        "pathPrefix": "/basdashboard"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "garwin-services",
+    "microservices": [
+      {
+        "microserviceName": "garwin-agent-services",
+        "serviceName": "service-garwin-agent-services",
+        "pathPrefix": "/grwn-agent-services"
+      },
+      {
+        "microserviceName": "garwin-contract-services",
+        "serviceName": "service-garwin-contract-services",
+        "pathPrefix": "/grwn-contract-services"
+      },
+      {
+        "microserviceName": "garwin-contractentity-services",
+        "serviceName": "service-garwin-contractentity-services",
+        "pathPrefix": "/grwn-contractentity-services"
+      },
+      {
+        "microserviceName": "garwin-data-services",
+        "serviceName": "service-garwin-data-services",
+        "pathPrefix": "/grwn-data-services"
+      },
+      {
+        "microserviceName": "garwin-financial-services",
+        "serviceName": "service-garwin-financial-services",
+        "pathPrefix": "/grwn-financial-services"
+      },
+      {
+        "microserviceName": "garwin-goodorder-service",
+        "serviceName": "service-garwin-goodorder-service",
+        "pathPrefix": "/grwn-goodorder-service"
+      },
+      {
+        "microserviceName": "garwin-maintenance-services",
+        "serviceName": "service-garwin-maintenance-services",
+        "pathPrefix": "/grwn-maint-services"
+      },
+      {
+        "microserviceName": "garwin-quote-services",
+        "serviceName": "service-garwin-quote-services",
+        "pathPrefix": "/grwn-quote-services"
+      },
+      {
+        "microserviceName": "garwin-report-services",
+        "serviceName": "service-garwin-report-services",
+        "pathPrefix": "/grwn-report-services"
+      },
+      {
+        "microserviceName": "garwin-tranprocess-services",
+        "serviceName": "service-garwin-tranprocess-services",
+        "pathPrefix": "/grwn-process-services"
+      },
+      {
+        "microserviceName": "garwin-validation-services",
+        "serviceName": "service-garwin-validation-services",
+        "pathPrefix": "/grwn-validation-services"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "generic-internal-service",
+    "microservices": [
+      {
+        "microserviceName": "garwin-cadaily-app",
+        "serviceName": "service-garwin-cadaily-app",
+        "pathPrefix": "/icadaily"
+      },
+      {
+        "microserviceName": "garwin-camonthly-app",
+        "serviceName": "service-garwin-camonthly-app",
+        "pathPrefix": "/icamonthly"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "lifecad-services",
+    "microservices": [
+      {
+        "microserviceName": "lifecad-agent-services",
+        "serviceName": "service-lifecad-agent-services",
+        "pathPrefix": "/lc-agent-services"
+      },
+      {
+        "microserviceName": "lifecad-batchcycle-services",
+        "serviceName": "service-lifecad-batchcycle-services",
+        "pathPrefix": "/lc-batchcycle-services"
+      },
+      {
+        "microserviceName": "lifecad-contractentity-services",
+        "serviceName": "service-lifecad-contractentity-services",
+        "pathPrefix": "/lc-contractentity-services"
+      },
+      {
+        "microserviceName": "lifecad-contractinfo-services",
+        "serviceName": "service-lifecad-contractinfo-services",
+        "pathPrefix": "/lc-contractinfo-services"
+      },
+      {
+        "microserviceName": "lifecad-correspondence-services",
+        "serviceName": "service-lifecad-correspondence-services",
+        "pathPrefix": "/lc-correspondence-services"
+      },
+      {
+        "microserviceName": "lifecad-data-services",
+        "serviceName": "service-lifecad-data-services",
+        "pathPrefix": "/lc-data-services"
+      },
+      {
+        "microserviceName": "lifecad-financialtran-services",
+        "serviceName": "service-lifecad-financialtran-services",
+        "pathPrefix": "/lc-financialtran-services"
+      },
+      {
+        "microserviceName": "lifecad-nonfinancialtran-services",
+        "serviceName": "service-lifecad-nonfinancialtran-services",
+        "pathPrefix": "/lc-nonfinancialtran-services"
+      }
+    ]
+  },
+  {
+    "microservicesGroup": "portal-services",
+    "microservices": [
+      {
+        "microserviceName": "audit-services",
+        "serviceName": "service-audit-services",
+        "pathPrefix": "/audit-services"
+      },
+      {
+        "microserviceName": "document-engine",
+        "serviceName": "service-document-engine",
+        "pathPrefix": "/document-engine"
+      },
+      {
+        "microserviceName": "email-services",
+        "serviceName": "service-email-services",
+        "pathPrefix": "/email-services"
+      },
+      {
+        "microserviceName": "portal-adminmodule-api",
+        "serviceName": "service-portal-adminmodule-api",
+        "pathPrefix": "/portal-adminmodule-api"
+      },
+      {
+        "microserviceName": "portal-bobreport-services",
+        "serviceName": "service-portal-bobreport-services",
+        "pathPrefix": "/portal-bobreport-services"
+      },
+      {
+        "microserviceName": "portal-claims-api",
+        "serviceName": "service-portal-claims-api",
+        "pathPrefix": "/portal-claims-api"
+      },
+      {
+        "microserviceName": "portal-commission-services",
+        "serviceName": "service-portal-commission-services",
+        "pathPrefix": "/portal-commission-services"
+      },
+      {
+        "microserviceName": "portal-csr-api",
+        "serviceName": "service-portal-csr-api",
+        "pathPrefix": "/portal-csr-api"
+      },
+      {
+        "microserviceName": "portal-customer-api",
+        "serviceName": "service-portal-customer-api",
+        "pathPrefix": "/portal-customer-api"
+      },
+      {
+        "microserviceName": "portal-professional-api",
+        "serviceName": "service-portal-professional-api",
+        "pathPrefix": "/portal-professional-api"
+      },
+      {
+        "microserviceName": "portal-transaction-api",
+        "serviceName": "service-portal-transaction-api",
+        "pathPrefix": "/portal-transaction-api"
+      },
+      {
+        "microserviceName": "portal-userprofile-api",
+        "serviceName": "service-portal-userprofile-api",
+        "pathPrefix": "/portal-userprofile-api"
+      },
+      {
+        "microserviceName": "profile-services",
+        "serviceName": "service-profile-services",
+        "pathPrefix": "/profile-services"
+      },
+      {
+        "microserviceName": "sharepoint-services",
+        "serviceName": "service-sharepoint-services",
+        "pathPrefix": "/sharepoint-services"
+      }
+    ]
+  }
+]

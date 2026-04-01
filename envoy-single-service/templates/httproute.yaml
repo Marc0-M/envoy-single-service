@@ -1,0 +1,23 @@
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ include "envoy-single-service.httpRouteName" . }}
+  namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+  labels:
+    {{- include "envoy-single-service.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ .Values.gateway.name }}
+      namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+      sectionName: {{ .Values.gateway.listenerName }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: {{ include "envoy-single-service.pathPrefix" . | quote }}
+      timeouts:
+        request: {{ .Values.timeouts.request | quote }}
+      backendRefs:
+        - name: {{ include "envoy-single-service.serviceName" . }}
+          namespace: {{ include "envoy-single-service.backendNamespace" . }}
+          port: {{ .Values.backend.port }}

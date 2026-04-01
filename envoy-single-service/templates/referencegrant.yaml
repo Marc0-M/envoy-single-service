@@ -1,0 +1,17 @@
+
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: {{ include "envoy-single-service.referenceGrantName" . }}
+  namespace: {{ include "envoy-single-service.backendNamespace" . }}
+  labels:
+    {{- include "envoy-single-service.labels" . | nindent 4 }}
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+  to:
+    - group: ""
+      kind: Service
+      name: {{ include "envoy-single-service.serviceName" . }}

@@ -1,0 +1,32 @@
+Release: {{ .Release.Name }}
+
+Generated resources:
+- HTTPRoute:
+  {{ include "envoy-single-service.httpRouteName" . }}
+  namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+
+- ReferenceGrant:
+  {{ include "envoy-single-service.referenceGrantName" . }}
+  namespace: {{ include "envoy-single-service.backendNamespace" . }}
+
+{{- if .Values.backend.tlsEnabled }}
+- BackendTLSPolicy:
+  {{ include "envoy-single-service.backendTLSPolicyName" . }}
+  namespace: {{ include "envoy-single-service.backendNamespace" . }}
+{{- end }}
+
+Derived values:
+- Gateway namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+- Backend namespace: {{ include "envoy-single-service.backendNamespace" . }}
+- Service name: {{ include "envoy-single-service.serviceName" . }}
+- Path prefix: {{ include "envoy-single-service.pathPrefix" . }}
+
+Examples:
+  https://<your-host>{{ include "envoy-single-service.pathPrefix" . }}
+
+Check:
+  kubectl -n {{ include "envoy-single-service.gatewayNamespace" . }} get httproute {{ include "envoy-single-service.httpRouteName" . }}
+  kubectl -n {{ include "envoy-single-service.backendNamespace" . }} get referencegrant {{ include "envoy-single-service.referenceGrantName" . }}
+{{- if .Values.backend.tlsEnabled }}
+  kubectl -n {{ include "envoy-single-service.backendNamespace" . }} get backendtlspolicy {{ include "envoy-single-service.backendTLSPolicyName" . }}
+{{- end }}

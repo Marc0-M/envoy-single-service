@@ -1,0 +1,24 @@
+
+{{- if .Values.gateway.create }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ .Values.gateway.name }}
+  namespace: {{ include "envoy-single-service.gatewayNamespace" . }}
+  labels:
+    {{- include "envoy-single-service.labels" . | nindent 4 }}
+spec:
+  gatewayClassName: {{ .Values.gateway.gatewayClassName }}
+  listeners:
+    - name: {{ .Values.gateway.listenerName }}
+      protocol: HTTPS
+      port: {{ .Values.gateway.port }}
+      allowedRoutes:
+        namespaces:
+          from: {{ .Values.gateway.allowedRoutesFrom }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {{ .Values.gateway.tlsSecretName }}
+{{- end }}
