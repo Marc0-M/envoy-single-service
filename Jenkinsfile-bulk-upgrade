@@ -152,13 +152,14 @@ String sanitizeReleaseFilter(String rawValue) {
   return rawValue?.trim() ?: ''
 }
 
-String buildHelmUpgradeCommand(Map release, String chartRef, String chartVersion, String kubeContext, boolean dryRun) {
+String buildHelmUpgradeCommand(Map release, String chartRef, String chartVersion, String kubeContext, String requestTimeout, boolean dryRun) {
   List<String> command = [
     "helm upgrade ${shellQuote(release.name.toString())}",
     shellQuote(chartRef),
     "--kube-context ${shellQuote(kubeContext)}",
     "--namespace ${shellQuote(release.namespace.toString())}",
     "--version ${shellQuote(chartVersion)}",
+    "--set-string timeouts.request=${shellQuote(requestTimeout)}",
     '--reuse-values',
     '--history-max 10',
   ]
@@ -263,6 +264,11 @@ properties([
       defaultValue: '',
       description: 'Optional regex to limit which discovered Helm release names are processed.'
     ),
+    string(
+      name: 'REQUEST_TIMEOUT',
+      defaultValue: '60s',
+      description: 'Request timeout applied to every upgraded release in this run.'
+    ),
     booleanParam(
       name: 'VALIDATE_ONLY',
       defaultValue: false,
@@ -318,6 +324,7 @@ pipeline {
           echo "Kube context: ${env.KUBE_CONTEXT}"
           echo "AWS credential ID: ${env.CRED_ID}"
           echo "Chart version: ${params.CHART_VERSION}"
+          echo "Request timeout: ${params.REQUEST_TIMEOUT}"
           echo "Release filter: ${env.RELEASE_FILTER_SANITIZED ?: '<all releases>'}"
           echo "Validate only: ${params.VALIDATE_ONLY}"
         }
@@ -453,7 +460,7 @@ pipeline {
 
                 releases.each { release ->
                   def entry = reportEntries.find { it.release == release.name && it.namespace == release.namespace }
-                  String command = buildHelmUpgradeCommand(release, env.CHART_REF, params.CHART_VERSION, env.KUBE_CONTEXT, dryRun)
+                  String command = buildHelmUpgradeCommand(release, env.CHART_REF, params.CHART_VERSION, env.KUBE_CONTEXT, params.REQUEST_TIMEOUT, dryRun)
                   echo "${label}: ${release.namespace}/${release.name}"
 
                   try {

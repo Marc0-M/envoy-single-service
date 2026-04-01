@@ -1,3 +1,4 @@
+{{- $timeouts := .Values.timeouts | default dict }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -16,7 +17,7 @@ spec:
             type: PathPrefix
             value: {{ include "envoy-single-service.pathPrefix" . | quote }}
       timeouts:
-        request: {{ .Values.timeouts.request | quote }}
+        request: {{ $timeouts.request | default "60s" | quote }}
       backendRefs:
         - name: {{ include "envoy-single-service.serviceName" . }}
           namespace: {{ include "envoy-single-service.backendNamespace" . }}
