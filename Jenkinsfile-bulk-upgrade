@@ -1,5 +1,6 @@
 import groovy.json.JsonOutput
 import groovy.json.JsonSlurperClassic
+import org.jenkinsci.plugins.workflow.cps.NonCPS
 
 
 def environmentChoices = [
@@ -85,6 +86,7 @@ List<String> getTargetEnvironments(String targetEnv) {
   return normalizedEnv ? [normalizedEnv] : []
 }
 
+@NonCPS
 boolean releaseMatchesTargetEnvironments(Map item, List<String> targetEnvs) {
   String namespace = item.namespace?.toString() ?: ''
   String releaseName = item.name?.toString() ?: ''
@@ -94,6 +96,52 @@ boolean releaseMatchesTargetEnvironments(Map item, List<String> targetEnvs) {
     namespace.endsWith("-${envName}") ||
     releaseName.endsWith("-${envName}")
   }
+}
+
+@NonCPS
+List<Map> selectTargetReleases(List discovered, List<String> targetEnvs, String releaseFilter) {
+  List<Map> releases = []
+
+  discovered.each { item ->
+    String chartName = item.chart?.toString() ?: ''
+    String releaseName = item.name?.toString() ?: ''
+
+    if (!chartName.startsWith('envoy-single-service-')) {
+      return
+    }
+
+    String matchedEnv = targetEnvs.find { envName ->
+      String namespace = item.namespace?.toString() ?: ''
+      namespace == "common-gw-${envName}" ||
+        namespace.endsWith("-${envName}") ||
+        releaseName.endsWith("-${envName}")
+    }
+
+    if (!matchedEnv) {
+      return
+    }
+
+    if (releaseFilter && !(releaseName ==~ releaseFilter)) {
+      return
+    }
+
+    releases << [
+      name: releaseName,
+      namespace: item.namespace?.toString(),
+      chart: chartName,
+      status: item.status?.toString(),
+      revision: item.revision?.toString(),
+      targetEnv: matchedEnv,
+    ]
+  }
+
+  releases.sort { left, right ->
+    String leftKey = "${left.targetEnv}|${left.namespace}|${left.name}"
+    String rightKey = "${right.targetEnv}|${right.namespace}|${right.name}"
+    leftKey <=> rightKey
+  }
+
+  return releases
 }
 
 String shellQuote(String value) {
@@ -121,6 +169,76 @@ String buildHelmUpgradeCommand(Map release, String chartRef, String chartVersion
   }
 
   return command.join(" \\\n  ")
+}
+
+@NonCPS
+Map summarizeReportStatuses(List<Map> reportEntries) {
+  Map summary = [
+    discovered: reportEntries.size(),
+    validated: 0,
+    upgraded: 0,
+    failed: 0,
+    skippedApply: 0,
+    pending: 0,
+  ]
+
+  reportEntries.each { entry ->
+    if (entry.validationStatus == 'PASSED') {
+      summary.validated = summary.validated + 1
+    }
+    if (entry.applyStatus == 'SKIPPED') {
+      summary.skippedApply = summary.skippedApply + 1
+    }
+    if (entry.finalStatus == 'UPGRADED') {
+      summary.upgraded = summary.upgraded + 1
+    } else if (entry.finalStatus == 'FAILED') {
+      summary.failed = summary.failed + 1
+    } else if (entry.finalStatus == 'PENDING') {
+      summary.pending = summary.pending + 1
+    }
+  }
+
+  return summary
+}
+
+@NonCPS
+String buildBulkUpgradeReport(List<Map> reportEntries, List<String> targetEnvs, Map meta) {
+  List<String> lines = []
+
+  lines << '# Bulk Upgrade Report'
+  lines << ''
+  lines << "- Environment family: ${meta.environmentFamily}"
+  lines << "- Target environments: ${targetEnvs.join(', ')}"
+  lines << "- Chart version: ${meta.chartVersion}"
+  lines << "- Validate only: ${meta.validateOnly}"
+  lines << ''
+
+  targetEnvs.each { targetEnv ->
+    List<Map> envReleases = reportEntries.findAll { it.targetEnv == targetEnv }
+    if (!envReleases.isEmpty()) {
+      lines << "## ${targetEnv}"
+      lines << ''
+      lines << '| Namespace | Release | Installed Status | Revision | Validation | Apply | Final | Notes |'
+      lines << '| --- | --- | --- | --- | --- | --- | --- | --- |'
+      envReleases.each { entry ->
+        String notes = (entry.notes ?: '').replace('|', '/').replace('\n', ' ')
+        lines << "| ${entry.namespace} | ${entry.release} | ${entry.installedStatus} | ${entry.installedRevision} | ${entry.validationStatus} | ${entry.applyStatus} | ${entry.finalStatus} | ${notes} |"
+      }
+      lines << ''
+    }
+  }
+
+  Map summary = summarizeReportStatuses(reportEntries)
+  lines << '## Summary'
+  lines << ''
+  lines << "- Discovered releases: ${summary.discovered}"
+  lines << "- Validated successfully: ${summary.validated}"
+  lines << "- Upgraded successfully: ${summary.upgraded}"
+  lines << "- Failed: ${summary.failed}"
+  lines << "- Apply skipped: ${summary.skippedApply}"
+  lines << "- Pending: ${summary.pending}"
+
+  return lines.join('\n') + '\n'
 }
 
 properties([
@@ -264,24 +382,7 @@ pipeline {
               def discovered = helmListJson ? new JsonSlurperClassic().parseText(helmListJson) : []
               def releaseFilter = env.RELEASE_FILTER_SANITIZED ?: ''
               def targetEnvs = new JsonSlurperClassic().parseText(env.TARGET_ENVS_JSON)
-              def releases = discovered.findAll { item ->
-                String chartName = item.chart?.toString() ?: ''
-                String releaseName = item.name?.toString() ?: ''
-                chartName.startsWith('envoy-single-service-') &&
-                  releaseMatchesTargetEnvironments(item, targetEnvs) &&
-                  (!releaseFilter || (releaseName ==~ releaseFilter))
-              }.collect { item ->
-                [
-                  name: item.name?.toString(),
-                  namespace: item.namespace?.toString(),
-                  chart: item.chart?.toString(),
-                  status: item.status?.toString(),
-                  revision: item.revision?.toString(),
-                  targetEnv: targetEnvs.find { envName -> releaseMatchesTargetEnvironments(item, [envName]) } ?: 'unknown',
-                ]
-              }.sort { left, right ->
-                [left.targetEnv, left.namespace, left.name] <=> [right.targetEnv, right.namespace, right.name]
-              }
+              def releases = selectTargetReleases(discovered, targetEnvs, releaseFilter)
 
               if (releases.isEmpty()) {
                 String suffix = releaseFilter ? " matching regex '${releaseFilter}'" : ''
@@ -293,48 +394,126 @@ pipeline {
               archiveArtifacts artifacts: 'discovered-envoy-single-service-releases.json', onlyIfSuccessful: false
 
               echo "Discovered ${releases.size()} envoy-single-service releases across ${targetEnvs.join(', ')}:"
-              releases.groupBy { it.targetEnv }.keySet().sort().each { targetEnv ->
-                echo "Subenvironment: ${targetEnv}"
-                releases.findAll { it.targetEnv == targetEnv }.each { release ->
-                  echo "- ${release.namespace}/${release.name} (chart=${release.chart}, status=${release.status}, revision=${release.revision})"
+              targetEnvs.each { targetEnv ->
+                def envReleases = releases.findAll { it.targetEnv == targetEnv }
+                if (!envReleases.isEmpty()) {
+                  echo "Subenvironment: ${targetEnv}"
+                  envReleases.each { release ->
+                    echo "- ${release.namespace}/${release.name} (chart=${release.chart}, status=${release.status}, revision=${release.revision})"
+                  }
                 }
+              }
+
+              def reportEntries = releases.collect { release ->
+                [
+                  targetEnv: release.targetEnv,
+                  namespace: release.namespace,
+                  release: release.name,
+                  installedChart: release.chart,
+                  installedStatus: release.status ?: 'unknown',
+                  installedRevision: release.revision ?: 'unknown',
+                  validationStatus: 'PENDING',
+                  applyStatus: params.VALIDATE_ONLY ? 'SKIPPED' : 'PENDING',
+                  finalStatus: 'PENDING',
+                  notes: '',
+                ]
+              }
+
+              def updateFinalStatuses = {
+                reportEntries.each { entry ->
+                  if (entry.validationStatus == 'FAILED' || entry.applyStatus == 'FAILED') {
+                    entry.finalStatus = 'FAILED'
+                  } else if (entry.validationStatus == 'PASSED' && entry.applyStatus == 'PASSED') {
+                    entry.finalStatus = 'UPGRADED'
+                  } else if (entry.validationStatus == 'PASSED' && entry.applyStatus == 'SKIPPED') {
+                    entry.finalStatus = 'VALIDATED'
+                  } else {
+                    entry.finalStatus = 'PENDING'
+                  }
+                }
+              }
+
+              def writeReport = {
+                updateFinalStatuses()
+                Map meta = [
+                  environmentFamily: params.ENV,
+                  chartVersion: params.CHART_VERSION,
+                  validateOnly: params.VALIDATE_ONLY,
+                ]
+                writeFile file: 'bulk-upgrade-report.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(reportEntries))
+                writeFile file: 'bulk-upgrade-report.md', text: buildBulkUpgradeReport(reportEntries, targetEnvs, meta)
+                archiveArtifacts artifacts: 'bulk-upgrade-report.json,bulk-upgrade-report.md', onlyIfSuccessful: false
+
+                def summary = summarizeReportStatuses(reportEntries)
+                echo "Bulk upgrade summary: discovered=${summary.discovered}, validated=${summary.validated}, upgraded=${summary.upgraded}, failed=${summary.failed}, skippedApply=${summary.skippedApply}, pending=${summary.pending}"
               }
 
               def runPass = { boolean dryRun, String label ->
                 def failures = []
 
                 releases.each { release ->
+                  def entry = reportEntries.find { it.release == release.name && it.namespace == release.namespace }
                   String command = buildHelmUpgradeCommand(release, env.CHART_REF, params.CHART_VERSION, env.KUBE_CONTEXT, dryRun)
                   echo "${label}: ${release.namespace}/${release.name}"
 
                   try {
                     sh command
+                    if (dryRun) {
+                      entry.validationStatus = 'PASSED'
+                    } else {
+                      entry.applyStatus = 'PASSED'
+                    }
                   } catch (err) {
+                    String message = (err.getMessage() ?: err.toString()).replaceAll(/\s+/, ' ').take(200)
+                    if (dryRun) {
+                      entry.validationStatus = 'FAILED'
+                    } else {
+                      entry.applyStatus = 'FAILED'
+                    }
+                    entry.notes = "${label} failed: ${message}"
                     failures << [
                       release: release.name,
                       namespace: release.namespace,
                       action: label,
-                      message: err.toString(),
+                      message: message,
                     ]
-                    echo "${label} failed for ${release.namespace}/${release.name}: ${err}"
+                    echo "${label} failed for ${release.namespace}/${release.name}: ${message}"
                   }
                 }
 
-                if (!failures.isEmpty()) {
-                  String fileName = dryRun ? 'bulk-upgrade-validation-failures.json' : 'bulk-upgrade-apply-failures.json'
-                  writeFile file: fileName, text: JsonOutput.prettyPrint(JsonOutput.toJson(failures))
-                  archiveArtifacts artifacts: fileName, onlyIfSuccessful: false
-                  error("${label} failed for ${failures.size()} release(s). See ${fileName} for details.")
-                }
+                return failures
               }
 
-              runPass(true, 'Validating upgrade')
+              def validationFailures = []
+              def applyFailures = []
 
-              if (params.VALIDATE_ONLY) {
-                echo 'Validated all discovered envoy-single-service releases successfully. No upgrades were applied.'
-              } else {
-                runPass(false, 'Upgrading release')
-                echo 'Upgraded all discovered envoy-single-service releases successfully.'
+              try {
+                validationFailures = runPass(true, 'Validating upgrade')
+
+                if (validationFailures.isEmpty()) {
+                  if (params.VALIDATE_ONLY) {
+                    echo 'Validated all discovered envoy-single-service releases successfully. No upgrades were applied.'
+                  } else {
+                    applyFailures = runPass(false, 'Upgrading release')
+                    if (applyFailures.isEmpty()) {
+                      echo 'Upgraded all discovered envoy-single-service releases successfully.'
+                    }
+                  }
+                }
+              } finally {
+                writeReport()
+              }
+
+              if (!validationFailures.isEmpty()) {
+                writeFile file: 'bulk-upgrade-validation-failures.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(validationFailures))
+                archiveArtifacts artifacts: 'bulk-upgrade-validation-failures.json', onlyIfSuccessful: false
+                error("Validation failed for ${validationFailures.size()} release(s). See bulk-upgrade-validation-failures.json and bulk-upgrade-report.md for details.")
+              }
+
+              if (!applyFailures.isEmpty()) {
+                writeFile file: 'bulk-upgrade-apply-failures.json', text: JsonOutput.prettyPrint(JsonOutput.toJson(applyFailures))
+                archiveArtifacts artifacts: 'bulk-upgrade-apply-failures.json', onlyIfSuccessful: false
+                error("Upgrade failed for ${applyFailures.size()} release(s). See bulk-upgrade-apply-failures.json and bulk-upgrade-report.md for details.")
               }
             }
           }
