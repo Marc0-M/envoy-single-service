@@ -5,16 +5,9 @@ import groovy.json.JsonSlurperClassic
 def environmentChoices = [
   'Select_one',
   'dev',
-  'devb',
-  'devc',
   'intg',
-  'intgb',
-  'intgc',
   'accp',
-  'accpb',
-  'accpc',
-  'proda',
-  'prodb',
+  'prod',
 ]
 
 boolean isProdEnv(String targetEnv) {
@@ -73,6 +66,36 @@ String getCredentialId(String targetEnv) {
   return 'sa_deploy_null'
 }
 
+List<String> getTargetEnvironments(String targetEnv) {
+  String normalizedEnv = targetEnv?.toLowerCase() ?: ''
+
+  if (normalizedEnv == 'dev' || normalizedEnv.startsWith('dev')) {
+    return ['dev', 'devb', 'devc']
+  }
+  if (normalizedEnv == 'intg' || normalizedEnv.startsWith('intg')) {
+    return ['intg', 'intgb', 'intgc']
+  }
+  if (normalizedEnv == 'accp' || normalizedEnv.startsWith('accp')) {
+    return ['accp', 'accpb', 'accpc']
+  }
+  if (normalizedEnv == 'prod' || normalizedEnv.startsWith('prod')) {
+    return ['proda', 'prodb']
+  }
+
+  return normalizedEnv ? [normalizedEnv] : []
+}
+
+boolean releaseMatchesTargetEnvironments(Map item, List<String> targetEnvs) {
+  String namespace = item.namespace?.toString() ?: ''
+  String releaseName = item.name?.toString() ?: ''
+
+  return targetEnvs.any { envName ->
+    namespace == "common-gw-${envName}" ||
+    namespace.endsWith("-${envName}") ||
+    releaseName.endsWith("-${envName}")
+  }
+}
+
 String shellQuote(String value) {
   return "'${(value ?: '').replace("'", "'\"'\"'")}'"
 }
@@ -110,7 +133,7 @@ properties([
     choice(
       name: 'ENV',
       choices: environmentChoices.join('\n'),
-      description: 'Target cluster/environment to scan for installed envoy-single-service releases.'
+      description: 'Target environment family. Example: dev upgrades releases for dev, devb, and devc in the same cluster context.'
     ),
     string(
       name: 'CHART_VERSION',
@@ -157,18 +180,22 @@ pipeline {
             error('ENV is required.')
           }
 
+          def targetEnvs = getTargetEnvironments(params.ENV)
+
           env.REGION = getRegion(params.ENV)
           env.KUBE_CONTEXT = getKubeConfig(params.ENV)
           env.CRED_ID = getCredentialId(params.ENV)
           env.RELEASE_FILTER_SANITIZED = sanitizeReleaseFilter(params.RELEASE_FILTER)
+          env.TARGET_ENVS_JSON = JsonOutput.toJson(targetEnvs)
 
           if (env.CRED_ID == 'sa_deploy_null') {
             error("No AWS deployment credential mapping found for environment '${params.ENV}'.")
           }
 
-          currentBuild.displayName = "${params.ENV}-bulk-envoy-${params.CHART_VERSION}-#${currentBuild.number}"
+          currentBuild.displayName = "${params.ENV}-family-bulk-envoy-${params.CHART_VERSION}-#${currentBuild.number}"
 
-          echo "Environment: ${params.ENV}"
+          echo "Environment family: ${params.ENV}"
+          echo "Target environments: ${new JsonSlurperClassic().parseText(env.TARGET_ENVS_JSON).join(', ')}"
           echo "Region: ${env.REGION}"
           echo "Kube context: ${env.KUBE_CONTEXT}"
           echo "AWS credential ID: ${env.CRED_ID}"
@@ -236,10 +263,13 @@ pipeline {
 
               def discovered = helmListJson ? new JsonSlurperClassic().parseText(helmListJson) : []
               def releaseFilter = env.RELEASE_FILTER_SANITIZED ?: ''
+              def targetEnvs = new JsonSlurperClassic().parseText(env.TARGET_ENVS_JSON)
               def releases = discovered.findAll { item ->
                 String chartName = item.chart?.toString() ?: ''
                 String releaseName = item.name?.toString() ?: ''
-                chartName.startsWith('envoy-single-service-') && (!releaseFilter || (releaseName ==~ releaseFilter))
+                chartName.startsWith('envoy-single-service-') &&
+                  releaseMatchesTargetEnvironments(item, targetEnvs) &&
+                  (!releaseFilter || (releaseName ==~ releaseFilter))
               }.collect { item ->
                 [
                   name: item.name?.toString(),
@@ -247,21 +277,27 @@ pipeline {
                   chart: item.chart?.toString(),
                   status: item.status?.toString(),
                   revision: item.revision?.toString(),
+                  targetEnv: targetEnvs.find { envName -> releaseMatchesTargetEnvironments(item, [envName]) } ?: 'unknown',
                 ]
+              }.sort { left, right ->
+                [left.targetEnv, left.namespace, left.name] <=> [right.targetEnv, right.namespace, right.name]
               }
 
               if (releases.isEmpty()) {
                 String suffix = releaseFilter ? " matching regex '${releaseFilter}'" : ''
-                error("No installed envoy-single-service releases were found in kube context '${env.KUBE_CONTEXT}'${suffix}.")
+                error("No installed envoy-single-service releases were found in kube context '${env.KUBE_CONTEXT}' for environment family '${params.ENV}' (${targetEnvs.join(', ')})${suffix}.")
               }
 
               env.DISCOVERED_RELEASES_JSON = JsonOutput.toJson(releases)
               writeFile file: 'discovered-envoy-single-service-releases.json', text: JsonOutput.prettyPrint(env.DISCOVERED_RELEASES_JSON)
               archiveArtifacts artifacts: 'discovered-envoy-single-service-releases.json', onlyIfSuccessful: false
 
-              echo "Discovered ${releases.size()} envoy-single-service releases:"
-              releases.each { release ->
-                echo "- ${release.namespace}/${release.name} (chart=${release.chart}, status=${release.status}, revision=${release.revision})"
+              echo "Discovered ${releases.size()} envoy-single-service releases across ${targetEnvs.join(', ')}:"
+              releases.groupBy { it.targetEnv }.keySet().sort().each { targetEnv ->
+                echo "Subenvironment: ${targetEnv}"
+                releases.findAll { it.targetEnv == targetEnv }.each { release ->
+                  echo "- ${release.namespace}/${release.name} (chart=${release.chart}, status=${release.status}, revision=${release.revision})"
+                }
               }
 
               def runPass = { boolean dryRun, String label ->
