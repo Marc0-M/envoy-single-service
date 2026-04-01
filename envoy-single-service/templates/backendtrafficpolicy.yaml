@@ -1,4 +1,6 @@
-{{- if .Values.backendTrafficPolicy.create }}
+{{- $backendTrafficPolicy := .Values.backendTrafficPolicy | default dict }}
+{{- $cookie := $backendTrafficPolicy.cookie | default dict }}
+{{- if ($backendTrafficPolicy.create | default false) }}
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: BackendTrafficPolicy
 metadata:
@@ -16,8 +18,8 @@ spec:
     consistentHash:
       type: Cookie
       cookie:
-        name: {{ tpl .Values.backendTrafficPolicy.cookie.name . | quote }}
-        ttl: {{ .Values.backendTrafficPolicy.cookie.ttl | quote }}
+        name: {{ tpl ($cookie.name | default "session-{{ .Values.microservice }}") . | quote }}
+        ttl: {{ $cookie.ttl | default "30m" | quote }}
         attributes:
-          SameSite: {{ .Values.backendTrafficPolicy.cookie.sameSite | quote }}
+          SameSite: {{ $cookie.sameSite | default "Lax" | quote }}
 {{- end }}
