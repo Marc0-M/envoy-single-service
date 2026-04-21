@@ -1,55 +1,238 @@
-# envoy-single-service Helm Chart
+# envoy-single-service
 
-Expose a single microservice through Kubernetes Gateway API using Envoy Gateway.
+Expose one Kubernetes Service through Envoy Gateway by rendering Gateway API resources with a small, reusable Helm chart.
 
-This chart renders:
-- `HTTPRoute` (always)
-- `ReferenceGrant` (always)
-- `BackendTLSPolicy` (only when `backend.tlsEnabled=true`)
-- `Gateway` (only when `gateway.create=true`)
-- `BackendTrafficPolicy` (only when `backendTrafficPolicy.create=true`)
+This repository contains the chart, two Jenkins pipelines, a prerequisite bootstrap script, and a cluster validator for the Envoy Gateway rollout.
 
-## What This Chart Does
+## Repository Contents
 
-The chart routes traffic from a shared Gateway listener to one backend service.
+| Path | Purpose |
+| --- | --- |
+| `envoy-single-service/Chart.yaml` | Helm chart metadata. Current chart version is `0.1.0`. |
+| `envoy-single-service/values.yaml` | Default chart values used by local Helm rendering. |
+| `envoy-single-service/values.schema.json` | Helm values schema for required fields and supported environment names. |
+| `envoy-single-service/templates/httproute.yaml` | Main `HTTPRoute` template. Includes `rules.timeouts.request`. |
+| `envoy-single-service/templates/referencegrant.yaml` | Allows the `HTTPRoute` in `common-gw-<env>` to reference the backend Service in `<group>-<env>`. |
+| `envoy-single-service/templates/backendtlspolicy.yaml` | Creates `BackendTLSPolicy` when `backend.tlsEnabled=true`. |
+| `envoy-single-service/templates/backendtrafficpolicy.yaml` | Optionally creates Envoy Gateway `BackendTrafficPolicy` for cookie-based consistent hashing. |
+| `envoy-single-service/templates/gateway.yaml` | Optionally creates a Gateway when `gateway.create=true`. Shared Gateways are normally created as prerequisites instead. |
+| `envoy-single-service/templates/_helpers.tpl` | Central naming, namespace, Service, path, and label helpers. |
+| `envoy-single-service/templates/NOTES.txt` | Helm post-install notes with generated resource names and check commands. |
+| `Jenkinsfile` | Main selected-microservice deploy pipeline. Uses `helm upgrade --install`. |
+| `Jenkinsfile-bulk-upgrade` | Bulk upgrade pipeline for already-installed `envoy-single-service` releases. Uses `helm upgrade --reuse-values`. |
+| `bootstrap_envoy_prereqs.sh` | Optional root-level script to create Gateway namespaces, TLS Secrets, Gateways, backend CA Secrets, and optional Service annotations. |
+| `validate_envoy_resources.py` | Cluster validator for chart-managed HTTPRoutes, ReferenceGrants, BackendTLSPolicies, Gateways, Secrets, and Services. |
+| `microservices_dict.json` | Microservice catalog reference grouped by backend namespace prefix. |
 
-Derived conventions in templates:
-- Gateway namespace: `common-gw-<env>`
-- Backend namespace: `<group>-<env>`
-- Default backend service name: `service-<microservice>`
-- Default path prefix: `/<microservice>`
+All command examples in this README assume you are running from the repository root unless a command explicitly changes directory.
 
-## Envoy Gateway Shared Prerequisites
+## What The Chart Renders
 
-This guide captures the shared setup needed before deploying `envoy-single-service` releases with Jenkins or Helm.
+The chart always renders an `HTTPRoute` and a `ReferenceGrant`. It conditionally renders TLS, traffic policy, and Gateway resources depending on values.
 
-The chart assumes each subenvironment has:
+| Resource | Template | Namespace | Created When | Notes |
+| --- | --- | --- | --- | --- |
+| `HTTPRoute` | `templates/httproute.yaml` | `common-gw-<env>` | Always | Routes `pathPrefix` to the backend Service and sets `rules.timeouts.request`. |
+| `ReferenceGrant` | `templates/referencegrant.yaml` | `<group>-<env>` | Always | Required because the route lives in the Gateway namespace and points to a Service in the backend namespace. |
+| `BackendTLSPolicy` | `templates/backendtlspolicy.yaml` | `<group>-<env>` | `backend.tlsEnabled=true` | Configures backend TLS validation using `backend.caSecretName` and `backend.hostname`. |
+| `BackendTrafficPolicy` | `templates/backendtrafficpolicy.yaml` | `common-gw-<env>` | `backendTrafficPolicy.create=true` | Envoy Gateway extension for cookie-based consistent hash session affinity. |
+| `Gateway` | `templates/gateway.yaml` | `common-gw-<env>` | `gateway.create=true` | Normally pre-created once per subenvironment and reused by many routes. |
 
-- a shared Gateway namespace named `common-gw-<env>`
-- a Gateway named `gw-<env>` in that namespace
-- a TLS Secret named `gateway-tls-secret` in the same namespace as the Gateway
-- backend CA Secrets in each backend application namespace when backend TLS validation is enabled
-- optional AWS LoadBalancer annotations on the Envoy Gateway Service that receives external or internal traffic
+The helpers derive these names and namespaces:
 
-Examples below use the `accp` family, which expands to:
+| Item | Convention |
+| --- | --- |
+| Gateway namespace | `common-gw-<env>` |
+| Backend namespace | `<group>-<env>` |
+| Default Gateway name | Usually `gw-<env>` from the Jenkins pipelines or prerequisite script. |
+| Default backend Service name | `service-<microservice>` unless `svc` is set. |
+| Default path prefix | `/<microservice>` unless `pathPrefix` is set. |
+| Base resource name | `<group>-<microservice>-<env>`, truncated to fit Kubernetes name limits. |
+| HTTPRoute name | `<base>-route` |
+| ReferenceGrant name | `<base>-refgrant` |
+| BackendTLSPolicy name | `<base>-btlsp` |
+| BackendTrafficPolicy name | `<base>-btp` |
 
-```text
-accp, accpb, accpc
+Important namespace note: `gateway.namespace` exists in `values.yaml`, but the current templates derive the Gateway namespace through `_helpers.tpl` as `common-gw-<env>`. Treat `common-gw-<env>` as the source of truth unless the chart helpers are intentionally changed.
+
+## Newer Template Behavior
+
+### HTTPRoute Request Timeout
+
+`templates/httproute.yaml` now renders:
+
+```yaml
+rules:
+  - timeouts:
+      request: "60s"
 ```
 
-### Recommended Order
+The value comes from `timeouts.request` and defaults to `60s` in `values.yaml`. The template uses a safe default so older Helm releases that did not previously have a `timeouts` map can still be upgraded with `--reuse-values`.
 
-1. Confirm Gateway API and Envoy Gateway are installed.
-2. Create the `common-gw-<env>` namespaces.
-3. Create or refresh the `gateway-tls-secret` TLS Secret in each Gateway namespace.
-4. Create the Gateway object in each Gateway namespace.
-5. Create backend CA Secrets in each backend namespace.
-6. Add AWS LoadBalancer annotations to the actual Envoy Gateway LoadBalancer Service, if required.
-7. Validate that Gateway, Secret, and backend CA resources exist before deploying microservice routes.
+Set it with Helm:
 
-### 1. Gateway Namespaces
+```bash
+--set-string timeouts.request=60s
+```
 
-Use `kubectl apply` style commands so the step can be safely repeated:
+Set it through Jenkins:
+
+```text
+REQUEST_TIMEOUT=60s
+```
+
+### BackendTrafficPolicy For Sticky Routing
+
+`templates/backendtrafficpolicy.yaml` is disabled by default and is created only when `backendTrafficPolicy.create=true`.
+
+When enabled, it targets the generated `HTTPRoute` and configures Envoy Gateway cookie-based consistent hashing:
+
+```yaml
+loadBalancer:
+  type: ConsistentHash
+  consistentHash:
+    type: Cookie
+    cookie:
+      name: "session-<microservice>"
+      ttl: "30m"
+      attributes:
+        SameSite: "Lax"
+```
+
+The default cookie name is templated from `session-{{ .Values.microservice }}`. You can override the cookie settings with:
+
+```bash
+--set backendTrafficPolicy.create=true \
+--set-string backendTrafficPolicy.cookie.name=session-my-service \
+--set-string backendTrafficPolicy.cookie.ttl=30m \
+--set-string backendTrafficPolicy.cookie.sameSite=Lax
+```
+
+This resource requires the Envoy Gateway extension CRD `backendtrafficpolicies.gateway.envoyproxy.io` to be installed in the cluster. If the CRD is missing, server-side dry-run and deployment will fail.
+
+### Gateway Template
+
+`templates/gateway.yaml` is available for special cases, but the normal operating model is to create one shared Gateway per subenvironment as a prerequisite:
+
+```text
+common-gw-dev/gw-dev
+common-gw-devb/gw-devb
+common-gw-devc/gw-devc
+common-gw-accp/gw-accp
+common-gw-accpb/gw-accpb
+common-gw-accpc/gw-accpc
+```
+
+Keep `gateway.create=false` for the normal shared-Gateway model.
+
+## Prerequisites
+
+Before deploying any microservice route, each target subenvironment needs shared Gateway infrastructure and backend CA Secrets.
+
+Required cluster pieces:
+
+| Requirement | Expected Standard |
+| --- | --- |
+| Gateway API CRDs | `Gateway`, `HTTPRoute`, `ReferenceGrant`, and `BackendTLSPolicy` available. |
+| Envoy Gateway | Envoy Gateway controller running and reconciling `GatewayClass envoy-gateway`. |
+| Gateway namespace | `common-gw-<env>`. |
+| Shared Gateway | `gw-<env>` in `common-gw-<env>` with HTTPS listener named `https`. |
+| Gateway TLS Secret | `gateway-tls-secret` in `common-gw-<env>`. |
+| Backend namespace | `<group>-<env>`. |
+| Backend Service | Service exists in `<group>-<env>`, normally `service-<microservice>`. |
+| Backend CA Secret | Secret exists in `<group>-<env>` with key `ca.crt` when backend TLS is enabled. |
+
+Install or verify Envoy Gateway control plane:
+
+```bash
+ENVOY_GATEWAY_VERSION=v1.7.0
+
+helm upgrade --install eg oci://docker.io/envoyproxy/gateway-helm \
+  --version "${ENVOY_GATEWAY_VERSION}" \
+  -n envoy-gateway-system \
+  --create-namespace
+
+kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for=condition=Available
+
+kubectl get gatewayclass
+kubectl get crd gateways.gateway.networking.k8s.io
+kubectl get crd httproutes.gateway.networking.k8s.io
+kubectl get crd referencegrants.gateway.networking.k8s.io
+kubectl get crd backendtlspolicies.gateway.networking.k8s.io
+kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io || true
+```
+
+The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`.
+
+## Prerequisite Bootstrap Script
+
+The root script can create or refresh the common Gateway prerequisites for an environment family.
+
+Dry-run first:
+
+```bash
+./bootstrap_envoy_prereqs.sh \
+  --env-family accp \
+  --context accp \
+  --tls-crt ./tls.crt \
+  --tls-key ./tls.key \
+  --ca-crt ./ca.crt \
+  --dry-run
+```
+
+Apply for the `accp` family, which expands to `accp`, `accpb`, and `accpc`:
+
+```bash
+./bootstrap_envoy_prereqs.sh \
+  --env-family accp \
+  --context accp \
+  --tls-crt ./tls.crt \
+  --tls-key ./tls.key \
+  --ca-crt ./ca.crt
+```
+
+If backend namespaces do not exist yet and should be created by the script:
+
+```bash
+./bootstrap_envoy_prereqs.sh \
+  --env-family accp \
+  --context accp \
+  --tls-crt ./tls.crt \
+  --tls-key ./tls.key \
+  --ca-crt ./ca.crt \
+  --create-backend-namespaces
+```
+
+Supported environment family expansion:
+
+| `--env-family` | Target subenvironments |
+| --- | --- |
+| `dev` | `dev`, `devb`, `devc` |
+| `intg` | `intg`, `intgb`, `intgc` |
+| `accp` | `accp`, `accpb`, `accpc` |
+| `prod` | `proda`, `prodb` |
+| Any other value | Treated as one environment name. |
+
+Default backend CA Secret mapping used by the script and expected by the pipelines:
+
+| Backend namespace prefix | Secret name |
+| --- | --- |
+| `annuity-services` | `annuity-backend-ca` |
+| `digtran-services` | `digtran-backend-ca` |
+| `document-services` | `document-backend-ca` |
+| `garwin-int-apps` | `garwin-backend-ca` |
+| `garwin-services` | `garwin-backend-ca` |
+| `generic-internal-service` | `generic-backend-ca` |
+| `lifecad-services` | `lifecad-backend-ca` |
+| `portal-services` | `portal-backend-ca` |
+
+Override or add mappings with repeatable `--backend-secret group:secret` arguments.
+
+## Manual Prerequisite Commands
+
+Use these if you do not want to run the bootstrap script.
+
+Create Gateway namespaces:
 
 ```bash
 for env in accp accpb accpc; do
@@ -57,13 +240,7 @@ for env in accp accpb accpc; do
 done
 ```
 
-Avoid plain `kubectl create ns ...` in repeatable runbooks or pipelines because it fails when the namespace already exists.
-
-### 2. Gateway TLS Secret
-
-The Gateway listener references a Kubernetes TLS Secret named `gateway-tls-secret`.
-
-The Secret must exist in the same namespace as the Gateway unless you intentionally configure cross-namespace references with `ReferenceGrant`. Our standard setup keeps the Secret and Gateway together.
+Create the Gateway TLS Secret in each Gateway namespace:
 
 ```bash
 for env in accp accpb accpc; do
@@ -74,23 +251,7 @@ for env in accp accpb accpc; do
 done
 ```
 
-Expected Secret type:
-
-```bash
-kubectl -n common-gw-accp get secret gateway-tls-secret -o jsonpath='{.type}{"\n"}'
-```
-
-Expected output:
-
-```text
-kubernetes.io/tls
-```
-
-### 3. Gateway Objects
-
-Each subenvironment gets one Gateway in its matching `common-gw-<env>` namespace.
-
-Example for `accpb`:
+Create one Gateway per subenvironment. Example for `accpb`:
 
 ```yaml
 apiVersion: gateway.networking.k8s.io/v1
@@ -115,47 +276,7 @@ spec:
             name: gateway-tls-secret
 ```
 
-Apply one Gateway per subenvironment:
-
-```bash
-kubectl apply -f accp-gw.yaml
-kubectl apply -f accpb-gw.yaml
-kubectl apply -f accpc-gw.yaml
-```
-
-Or generate them with the optional bootstrap script described later in this guide.
-
-Validation:
-
-```bash
-kubectl -n common-gw-accp get gateway gw-accp
-kubectl -n common-gw-accpb get gateway gw-accpb
-kubectl -n common-gw-accpc get gateway gw-accpc
-kubectl -n common-gw-accp describe gateway gw-accp
-```
-
-Look for `Accepted=True` and `Programmed=True` when the controller has reconciled the Gateway.
-
-### 4. Backend CA Secrets
-
-When the chart uses `backend.tlsEnabled=true`, `BackendTLSPolicy` expects a CA bundle Secret in the backend namespace.
-
-The Secret must contain the file key `ca.crt`.
-
-Standard backend CA secret mapping:
-
-| Backend namespace prefix | Secret name |
-| --- | --- |
-| `annuity-services` | `annuity-backend-ca` |
-| `digtran-services` | `digtran-backend-ca` |
-| `document-services` | `document-backend-ca` |
-| `garwin-int-apps` | `garwin-backend-ca` |
-| `garwin-services` | `garwin-backend-ca` |
-| `generic-internal-service` | `generic-backend-ca` |
-| `lifecad-services` | `lifecad-backend-ca` |
-| `portal-services` | `portal-backend-ca` |
-
-Example for `accp`:
+Create backend CA Secrets. Example for `accp`:
 
 ```bash
 kubectl -n annuity-services-accp create secret generic annuity-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
@@ -168,96 +289,19 @@ kubectl -n lifecad-services-accp create secret generic lifecad-backend-ca --from
 kubectl -n portal-services-accp create secret generic portal-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Repeat the same pattern for `accpb` and `accpc` if those backend namespaces exist.
+Repeat the same backend CA pattern for `accpb` and `accpc` if those namespaces exist.
 
-Validation example:
+## AWS LoadBalancer Annotations
 
-```bash
-kubectl -n portal-services-accp get secret portal-backend-ca -o jsonpath='{.data.ca\.crt}{"\n"}' | wc -c
-```
+AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service unless that Service is intentionally the LoadBalancer.
 
-The byte count should be greater than zero.
-
-### 5. AWS LoadBalancer Service Annotations
-
-These annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service unless that Service is intentionally the LoadBalancer.
-
-First identify the Service that owns the AWS LoadBalancer:
+Find the Service first:
 
 ```bash
 kubectl get svc -A | grep -E 'LoadBalancer|envoy|gateway'
 ```
 
-Then annotate the correct Service:
-
-```bash
-kubectl -n <service-namespace> annotate service <service-name> \
-  service.beta.kubernetes.io/aws-load-balancer-access-log-enabled="true" \
-  service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name="ven-accp-lb-logging" \
-  service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix="k8s-eg-accpc" \
-  service.beta.kubernetes.io/aws-load-balancer-backend-protocol="ssl" \
-  service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled="true" \
-  service.beta.kubernetes.io/aws-load-balancer-internal="true" \
-  service.beta.kubernetes.io/aws-load-balancer-security-groups="sg-0e0b2323db8b91d02" \
-  service.beta.kubernetes.io/aws-load-balancer-ssl-cert="arn:aws:acm:us-east-1:895013107628:certificate/31ac8bed-d83b-4219-b4ef-737b44ff2fdd" \
-  service.beta.kubernetes.io/aws-load-balancer-ssl-ports="443" \
-  service.beta.kubernetes.io/aws-load-balancer-subnets="subnet-063c61aa2ac7d7fbc,subnet-03a3db0d2b37568b2" \
-  service.beta.kubernetes.io/aws-load-balancer-type="nlb-ip" \
-  --overwrite
-```
-
-Important TLS note:
-
-- If the AWS NLB terminates TLS with ACM and then connects to Envoy with SSL, the `aws-load-balancer-ssl-cert`, `aws-load-balancer-ssl-ports`, and `aws-load-balancer-backend-protocol=ssl` annotations are expected.
-- If Envoy Gateway should be the only TLS termination point, use NLB TCP pass-through style configuration instead and avoid accidentally double-terminating TLS.
-- Keep the TLS model consistent with the Gateway listener. The sample Gateway above uses `protocol: HTTPS` and `tls.mode: Terminate`, which means Envoy expects TLS on the listener.
-
-The exact annotation set is environment-specific because S3 buckets, subnets, security groups, and ACM certificate ARNs are different per account and cluster.
-
-### 6. Optional Bootstrap Script
-
-The repo root includes an optional script:
-
-```bash
-./bootstrap_envoy_prereqs.sh
-```
-
-Dry-run first:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt \
-  --dry-run
-```
-
-Apply for `accp`, `accpb`, and `accpc`:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt
-```
-
-If backend namespaces do not exist yet and should be created by the script:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt \
-  --create-backend-namespaces
-```
-
-To annotate Envoy Gateway LoadBalancer Services, create an annotation file:
+Example annotation file for the bootstrap script:
 
 ```bash
 cat > accp-lb-annotations.env <<'EOF_ANNOTATIONS'
@@ -275,7 +319,7 @@ service.beta.kubernetes.io/aws-load-balancer-type=nlb-ip
 EOF_ANNOTATIONS
 ```
 
-Then run the script with explicit Service targets. The `{env}` placeholder is replaced with each target subenvironment:
+Apply annotations through the script. The `{env}` placeholder is replaced with each target subenvironment:
 
 ```bash
 ./bootstrap_envoy_prereqs.sh \
@@ -288,11 +332,261 @@ Then run the script with explicit Service targets. The `{env}` placeholder is re
   --annotate-service 'envoy-gateway-system/envoy-gateway-{env}'
 ```
 
-Adjust `envoy-gateway-system/envoy-gateway-{env}` to the real Service namespace/name in your cluster.
+Adjust `envoy-gateway-system/envoy-gateway-{env}` to the real Service namespace and name in the cluster.
 
-### 7. Final Validation Checklist
+TLS model reminder: if the AWS NLB terminates TLS with ACM and then connects to Envoy with SSL, the ACM and SSL annotations are expected. If Envoy Gateway should be the only TLS termination point, use NLB TCP pass-through style configuration instead. Keep this consistent with the Gateway listener, which uses `protocol: HTTPS` and `tls.mode: Terminate` in the standard example.
 
-Run these before deploying microservices through the chart:
+## Chart Values
+
+Required values:
+
+| Value | Description |
+| --- | --- |
+| `microservice` | Microservice name. Used in default Service name, path, and labels. |
+| `group` | Backend namespace prefix, such as `portal-services`. |
+| `env` | Environment suffix, such as `dev`, `devb`, `accp`, or `proda`. |
+| `gateway.name` | Existing Gateway name, usually `gw-<env>`. |
+| `backend.caSecretName` | Required by the schema; used as the backend CA Secret name when `backend.tlsEnabled=true`. |
+
+Important optional values:
+
+| Value | Default | Description |
+| --- | --- | --- |
+| `svc` | `service-<microservice>` | Backend Service name override. |
+| `pathPrefix` | `/<microservice>` | Path prefix override. |
+| `timeouts.request` | `60s` | Gateway API request timeout rendered into `HTTPRoute.spec.rules[].timeouts.request`. |
+| `gateway.create` | `false` | Create a Gateway from this chart. Usually keep this disabled. |
+| `gateway.listenerName` | `https` | Parent Gateway listener section name. |
+| `gateway.gatewayClassName` | `envoy-gateway` | GatewayClass name used only when `gateway.create=true`. |
+| `gateway.tlsSecretName` | empty | TLS Secret used only when `gateway.create=true`. |
+| `backend.port` | `443` | Backend Service port. |
+| `backend.tlsEnabled` | `true` | Create `BackendTLSPolicy`. |
+| `backend.hostname` | `*` | Backend TLS SNI and certificate hostname. Jenkins requires a concrete hostname when TLS is enabled. |
+| `backendTrafficPolicy.create` | `false` | Create Envoy Gateway `BackendTrafficPolicy`. |
+| `backendTrafficPolicy.cookie.name` | `session-{{ .Values.microservice }}` | Cookie name for consistent hash when BackendTrafficPolicy is enabled. |
+| `backendTrafficPolicy.cookie.ttl` | `30m` | Cookie TTL. |
+| `backendTrafficPolicy.cookie.sameSite` | `Lax` | Cookie SameSite attribute. Allowed values are `Strict`, `Lax`, and `None`. |
+
+Supported `env` values in `values.schema.json`:
+
+```text
+dev, devb, devc, intg, intgb, intgc, accp, accpb, accpc, proda, prodb
+```
+
+## Helm Usage
+
+Render locally from the repository root:
+
+```bash
+helm template annuity-webtransdb-api-dev ./envoy-single-service \
+  --set-string microservice=annuity-webtransdb-api \
+  --set-string group=annuity-services \
+  --set-string env=dev \
+  --set-string gateway.name=gw-dev \
+  --set-string backend.caSecretName=annuity-backend-ca \
+  --set-string backend.hostname=annuity-webtransdb-api-eks.dev.vaapps.net \
+  --set-string timeouts.request=60s
+```
+
+Validate against the cluster API without applying:
+
+```bash
+helm template annuity-webtransdb-api-dev ./envoy-single-service \
+  --set-string microservice=annuity-webtransdb-api \
+  --set-string group=annuity-services \
+  --set-string env=dev \
+  --set-string gateway.name=gw-dev \
+  --set-string backend.caSecretName=annuity-backend-ca \
+  --set-string backend.hostname=annuity-webtransdb-api-eks.dev.vaapps.net \
+  --set-string timeouts.request=60s \
+| kubectl --context dev apply --dry-run=server -f -
+```
+
+Install or upgrade from OCI:
+
+```bash
+helm upgrade --install annuity-webtransdb-api-dev oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
+  --kube-context dev \
+  --namespace default \
+  --version 0.1.0 \
+  --set-string microservice=annuity-webtransdb-api \
+  --set-string group=annuity-services \
+  --set-string env=dev \
+  --set-string gateway.name=gw-dev \
+  --set-string backend.caSecretName=annuity-backend-ca \
+  --set-string backend.hostname=annuity-webtransdb-api-eks.dev.vaapps.net \
+  --set-string timeouts.request=60s \
+  --history-max 10
+```
+
+Enable sticky routing for a release:
+
+```bash
+helm upgrade --install garwin-jmt-app-dev oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
+  --kube-context dev \
+  --namespace default \
+  --version 0.1.0 \
+  --reuse-values \
+  --set backendTrafficPolicy.create=true \
+  --set-string timeouts.request=60s \
+  --history-max 10
+```
+
+## Main Jenkins Pipeline
+
+`Jenkinsfile` deploys selected microservices from one selected group and environment.
+
+Key behavior:
+
+| Behavior | Detail |
+| --- | --- |
+| Helm command | Uses `helm upgrade --install`. This is correct for both first install and later upgrades. |
+| Validation | Renders each selected chart with `helm template` and runs `kubectl apply --dry-run=server -f -`. |
+| Apply | Skipped when `VALIDATE_ONLY=true`; otherwise applies each selected release. |
+| Gateway name | Defaults to `gw-<env>` unless `OVERRIDE_GATEWAY_NAME=true`. |
+| Backend CA Secret | Derived from the group prefix, such as `portal-backend-ca` for `portal-services`. |
+| Backend hostname | Required by the pipeline when `BACKEND_TLS_ENABLED=true`; wildcards are rejected. |
+| BackendTrafficPolicy | Controlled by `CREATE_BACKEND_TRAFFIC_POLICY`. |
+| Request timeout | Controlled by `REQUEST_TIMEOUT` and passed as `--set-string timeouts.request=<value>`. |
+| Extra Helm arguments | `HELM_EXTRA_ARGS` is appended after sanitization. It rejects shell metacharacters and should be whitespace-separated Helm args only. |
+
+Use `HELM_EXTRA_ARGS` in the main pipeline for one-off extra settings, for example:
+
+```text
+--set-string backendTrafficPolicy.cookie.ttl=45m --set-string backendTrafficPolicy.cookie.sameSite=Lax
+```
+
+If a value contains spaces or shell-sensitive characters, add a dedicated Jenkins parameter instead of forcing it through `HELM_EXTRA_ARGS`.
+
+## Bulk Upgrade Pipeline
+
+`Jenkinsfile-bulk-upgrade` upgrades already-installed `envoy-single-service` Helm releases across an environment family.
+
+Key behavior:
+
+| Behavior | Detail |
+| --- | --- |
+| Target discovery | Runs `helm list -A -o json` and selects releases whose chart starts with `envoy-single-service-`. |
+| Environment expansion | `dev` means `dev`, `devb`, `devc`; `intg` means `intg`, `intgb`, `intgc`; `accp` means `accp`, `accpb`, `accpc`; `prod` means `proda`, `prodb`. |
+| Release filter | Optional `RELEASE_FILTER` regex limits discovered release names. |
+| Validation pass | Runs `helm upgrade --dry-run --debug` for every discovered release. |
+| Apply pass | Runs only if every validation passes and `VALIDATE_ONLY=false`. |
+| Helm command | Uses `helm upgrade --reuse-values`, because this pipeline only acts on releases that already exist. |
+| Request timeout | Always passes `--set-string timeouts.request=<REQUEST_TIMEOUT>`. |
+| Reports | Archives `discovered-envoy-single-service-releases.json`, `bulk-upgrade-report.json`, `bulk-upgrade-report.md`, and failure JSON files when needed. |
+
+`helm upgrade` versus `helm upgrade --install`: for an existing release, both perform an upgrade. The `--install` flag only changes behavior when the release does not exist. The bulk pipeline intentionally uses plain `helm upgrade` because it discovers existing releases first and should not create new releases by accident.
+
+For future bulk settings beyond `REQUEST_TIMEOUT`, add explicit Jenkins parameters and append safe `--set` or `--set-string` arguments in `buildHelmUpgradeCommand`. Avoid a generic raw extra-args box in the bulk pipeline unless you also add the same kind of sanitization used in the main `Jenkinsfile`.
+
+## Validator
+
+Run the validator after deploying or bulk-upgrading routes:
+
+```bash
+python3 validate_envoy_resources.py --context dev --env dev
+python3 validate_envoy_resources.py --context accp --env accp
+python3 validate_envoy_resources.py --context accp --env accpb --export-ok
+```
+
+The validator discovers chart-managed resources by Helm labels and checks:
+
+| Check | What It Verifies |
+| --- | --- |
+| `HTTPRoute` exists | Route was created in `common-gw-<env>`. |
+| `ReferenceGrant` exists | Backend namespace allows the route namespace to reference the Service. |
+| Gateway exists | `parentRefs` point to an existing Gateway. |
+| Gateway conditions | Gateway `Accepted` and `Programmed` conditions when present. |
+| HTTPRoute conditions | Route `Accepted` and `ResolvedRefs` conditions when present. |
+| Backend Service exists | Route backend reference points to a real Service. |
+| BackendTLSPolicy exists | Warns if missing, which may be expected only when TLS is disabled. |
+| CA Secret exists | BackendTLS CA Secret exists and contains `ca.crt`. |
+
+Exit code is `1` when failures are found and `0` when there are no failures.
+
+## Verification Commands
+
+Check Helm values and rendered manifest stored in the release:
+
+```bash
+helm get values annuity-webtransdb-api-dev -n default --all
+helm get manifest annuity-webtransdb-api-dev -n default | sed -n '/kind: HTTPRoute/,+45p'
+```
+
+Check live Kubernetes resources:
+
+```bash
+kubectl -n common-gw-dev get httproute annuity-services-annuity-webtransdb-api-dev-route -o yaml | sed -n '/timeouts:/,+3p'
+kubectl -n common-gw-dev describe httproute annuity-services-annuity-webtransdb-api-dev-route
+kubectl -n annuity-services-dev get referencegrant annuity-services-annuity-webtransdb-api-dev-refgrant
+kubectl -n annuity-services-dev get backendtlspolicy annuity-services-annuity-webtransdb-api-dev-btlsp
+```
+
+Confirm the cluster schema supports HTTPRoute timeouts:
+
+```bash
+kubectl explain httproute.spec.rules.timeouts --api-version gateway.networking.k8s.io/v1
+```
+
+Confirm the Envoy Gateway BackendTrafficPolicy CRD exists before enabling sticky routing:
+
+```bash
+kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io
+kubectl explain backendtrafficpolicy.spec --api-version gateway.envoyproxy.io/v1alpha1
+```
+
+## When Helm Manifest And Live Resource Differ
+
+Sometimes `helm get values` and `helm get manifest` show a setting, but `kubectl get ... -o yaml` does not show it on the live object. Use this sequence before assuming Helm failed.
+
+First confirm you are looking at the same cluster and resource name:
+
+```bash
+kubectl config current-context
+helm status annuity-webtransdb-api-dev -n default
+helm get manifest annuity-webtransdb-api-dev -n default | grep -A 45 'kind: HTTPRoute'
+kubectl -n common-gw-dev get httproute annuity-services-annuity-webtransdb-api-dev-route -o yaml | grep -A 3 timeouts || true
+```
+
+Then confirm the API server accepts the manifest Helm has stored:
+
+```bash
+helm get manifest annuity-webtransdb-api-dev -n default | kubectl apply --dry-run=server -f -
+```
+
+If dry-run succeeds, prefer rerunning the Helm upgrade first:
+
+```bash
+helm upgrade annuity-webtransdb-api-dev oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
+  --kube-context dev \
+  --namespace default \
+  --version 0.1.0 \
+  --reuse-values \
+  --set-string timeouts.request=60s \
+  --history-max 10 \
+  --debug
+```
+
+If Helm history already contains the desired manifest and the live resource still needs repair, you can apply the stored Helm manifest directly:
+
+```bash
+helm get manifest annuity-webtransdb-api-dev -n default | kubectl apply -f -
+```
+
+Use the direct apply as a repair step, not as the normal deployment path. It applies every resource in that Helm release manifest. Because the manifest comes from Helm history, future Helm upgrades should remain consistent, but Jenkins or Helm should still be the long-term source of truth.
+
+If the field disappears again after apply, check for these causes:
+
+| Symptom | Likely Cause | Check |
+| --- | --- | --- |
+| Server dry-run rejects `timeouts` | Gateway API CRDs are too old for `HTTPRoute.spec.rules.timeouts`. | `kubectl explain httproute.spec.rules.timeouts --api-version gateway.networking.k8s.io/v1` |
+| Server dry-run succeeds but live object omits field | Wrong cluster/context, wrong route name, or another controller/process overwrote the route. | Compare `kubectl config current-context`, Helm status, and resource `metadata.managedFields`. |
+| Helm upgrade succeeds but resource is unchanged | The release manifest and live object are out of sync. | Run dry-run, rerun Helm with `--debug`, then repair with `helm get manifest | kubectl apply -f -` if needed. |
+| BackendTrafficPolicy fails to apply | Envoy Gateway extension CRD is missing or wrong version. | `kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io` |
+
+## Final Prerequisite Checklist
+
+Run this before deploying routes into a subenvironment family:
 
 ```bash
 for env in accp accpb accpc; do
@@ -302,7 +596,7 @@ for env in accp accpb accpc; do
 done
 ```
 
-Check backend CA Secrets:
+Check representative backend CA Secrets:
 
 ```bash
 kubectl -n annuity-services-accp get secret annuity-backend-ca
@@ -315,7 +609,7 @@ kubectl -n lifecad-services-accp get secret lifecad-backend-ca
 kubectl -n portal-services-accp get secret portal-backend-ca
 ```
 
-After microservice routes are deployed, run the validator:
+Run the repo validator after deploying:
 
 ```bash
 python3 validate_envoy_resources.py --context accp --env accp
@@ -323,164 +617,14 @@ python3 validate_envoy_resources.py --context accp --env accpb
 python3 validate_envoy_resources.py --context accp --env accpc
 ```
 
-### Common Issues
+## Troubleshooting
 
-- `Secret is not supplied by SDS`: confirm Envoy Gateway can read Secrets in Gateway and backend namespaces.
-- `HTTPRoute Accepted=False`: check Gateway name, listener `sectionName`, and `ReferenceGrant` permissions.
-- `BackendTLSPolicy ResolvedRefs=False`: confirm the CA Secret exists in the backend namespace and contains `ca.crt`.
-- Gateway has no public/internal endpoint: confirm the correct LoadBalancer Service was annotated and that AWS subnets/security groups/ACM ARN are correct for the target account.
-
-## Prerequisites
-
-1. Gateway API CRDs available in the cluster (GatwayClass & Gateway [Optional because it is included in the chart]).
-2. Envoy Gateway installed (controller running).
-3. Existing namespaces:
-   - `common-gw-<env>`
-   - `<group>-<env>`
-4. Existing backend Kubernetes Service in `<group>-<env>`.
-5. If `backend.tlsEnabled=true`, a CA secret must exist in `<group>-<env>`.
-```bash
-kubectl -n garwin-services-devc create secret generic garwin-backend-ca --from-file=ca.crt=./ca.crt
-```
-## Install Gateway API + Envoy Gateway
-
-### Install with Envoy Gateway Helm chart (includes CRDs)
-
-```bash
-ENVOY_GATEWAY_VERSION=v1.7.0
-
-helm install eg oci://docker.io/envoyproxy/gateway-helm \
-  --version ${ENVOY_GATEWAY_VERSION} \
-  -n envoy-gateway-system \
-  --create-namespace
-
-kubectl wait --timeout=5m -n envoy-gateway-system deployment/envoy-gateway --for=condition=Available
-```
-
-### Quick Control Plane Validation
-
-```bash
-kubectl get gatewayclass
-kubectl get crd gateways.gateway.networking.k8s.io
-kubectl get crd httproutes.gateway.networking.k8s.io
-kubectl get crd referencegrants.gateway.networking.k8s.io
-kubectl get crd backendtlspolicies.gateway.networking.k8s.io
-```
-
-## Chart Inputs
-
-### Required values
-
-- `microservice` (string)
-- `group` (string)
-- `env` (one of: `dev`, `devb`, `devc`, `intg`, `intgb`, `intgc`, `accp`, `accpb`, `accpc`, `proda`, `prodb`)
-- `gateway.name` (string)
-- `backend.caSecretName` (string)
-
-### Important optional values
-
-- `svc`: override backend Service name (default: `service-<microservice>`)
-- `pathPrefix`: override route path (default: `/<microservice>`)
-- `gateway.create`: create Gateway resource from this chart (`false` by default)
-- `gateway.listenerName`: listener section on parent Gateway (default: `https`)
-- `backend.port`: backend Service port (default: `443`)
-- `backend.tlsEnabled`: create `BackendTLSPolicy` (default: `true`)
-- `backend.hostname`: backend TLS SNI/hostname for validation (default: `*`)
-
-## Deploy This Chart
-
-### Validate the OCI chart from Artifactory (recommended)
-
-```bash
-helm registry login http://artifactory.tools.vaapps.net \
-  --username "${USERNAME}" \
-  --password "${TOKEN}"
-
-helm show chart oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service --version 0.1.0
-helm show values oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service --version 0.1.0
-
-helm template preview oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
-  --version 0.1.0 \
-  --set env=devc \
-  --set group=digtran-services \
-  --set microservice=admin-common-services \
-  --set gateway.name=https-gw-devc \
-  --set backend.caSecretName=digtran-backend-ca \
-  --set backend.hostname=dts-nlb-eks-c.dev.vaapps.net
-
-helm upgrade --install preview oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
-  --version 0.1.0 \
-  --set env=devc \
-  --set group=digtran-services \
-  --set microservice=admin-common-services \
-  --set gateway.name=https-gw-devc \
-  --set backend.caSecretName=digtran-backend-ca \
-  --set backend.hostname=dts-nlb-eks-c.dev.vaapps.net \
-  --dry-run --debug
-
-helm template preview oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
-  --version 0.1.0 \
-  --set env=devc \
-  --set group=digtran-services \
-  --set microservice=admin-common-services \
-  --set gateway.name=https-gw-devc \
-  --set backend.caSecretName=digtran-backend-ca \
-  --set backend.hostname=dts-nlb-eks-c.dev.vaapps.net \
-| kubectl apply --dry-run=server -f -
-```
-
-If you want to run `helm lint`, pull the OCI chart locally first:
-
-```bash
-helm pull oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service --version 0.1.0 --untar
-helm lint envoy-single-service
-```
-
-### Install/upgrade
-
-```bash
-helm upgrade --install <release-name> oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service \
-  --version 0.1.0 \
-  --set env=<env> \
-  --set group=<group> \
-  --set microservice=<microservice> \
-  --set gateway.name=<gateway-name> \
-  --set backend.caSecretName=<ca-secret> \
-  --set backend.hostname=<backend-hostname>
-```
-
-## Existing Commands
-
-### Example 1
-
-```bash
-helm install admin-common-services-devc oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service   --version 0.1.0 --set microservice=admin-common-services --set group=digtran-services --set env=devc --set gateway.name=https-gw-devc   --set backend.caSecretName=digtran-backend-ca   --set backend.hostname=dts-nlb-eks-c.dev.vaapps.net
-```
-
-### Example 2
-
-```bash
-helm install report-services-devc oci://artifactory.tools.vaapps.net/envoy-single-service/envoy-single-service --set env=devc --set group=garwin-services   --set microservice=report-services  --set gateway.name=https-gw-devc  --set backend.port=443 --set backend.tlsEnabled=true --set backend.caSecretName=garwin-backend-ca --set backend.hostname=dts-grwn-nlb-eks-c.dev.vaapps.net --set pathPrefix=/grwn-report-services --set svc=service-garwin-report-services
-```
-
-## Verify Installation
-
-Replace placeholders with your values:
-
-```bash
-kubectl -n common-gw-<env> get httproute
-kubectl -n <group>-<env> get referencegrant
-kubectl -n <group>-<env> get backendtlspolicy
-
-kubectl -n common-gw-<env> describe httproute <group>-<microservice>-<env>-route
-```
-
-## Notes and Troubleshooting
-
-1. The chart does not create namespaces.
-2. `HTTPRoute` is created in the gateway namespace and points to a Service in another namespace; `ReferenceGrant` is required for this cross-namespace reference.
-3. If using an existing shared Gateway (`gateway.create=false`), ensure:
-   - Gateway exists in `common-gw-<env>`
-   - Listener `sectionName` matches `gateway.listenerName`
-4. If backend TLS is enabled, confirm the CA secret name is correct and present in `<group>-<env>`.
-
+| Issue | What To Check |
+| --- | --- |
+| `Secret is not supplied by SDS` | Confirm Envoy Gateway can read the Gateway TLS Secret and any referenced backend CA Secrets. Check namespace, Secret name, Secret type, and controller RBAC. |
+| `HTTPRoute Accepted=False` | Check Gateway name, Gateway namespace, listener `sectionName`, and whether the Gateway allows routes from the route namespace. |
+| `HTTPRoute ResolvedRefs=False` | Check backend Service name, backend namespace, and ReferenceGrant permissions. |
+| `BackendTLSPolicy ResolvedRefs=False` | Confirm the CA Secret exists in the backend namespace and contains `ca.crt`. |
+| Gateway has no endpoint | Confirm the correct Envoy Gateway LoadBalancer Service exists and has the expected AWS annotations, subnets, security groups, and ACM ARN. |
+| Bulk upgrade fails with nil pointer on old values | Ensure chart templates use safe defaults and pass required new values, such as `--set-string timeouts.request=60s`. The current templates are safe for missing `timeouts` and `backendTrafficPolicy`. |
+| Sticky routing does not work | Confirm `BackendTrafficPolicy` was created, accepted by Envoy Gateway, and targets the generated HTTPRoute. |
