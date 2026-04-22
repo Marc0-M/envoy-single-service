@@ -24,7 +24,7 @@ This repository contains the chart, two Jenkins pipelines, a prerequisite bootst
 | `validate_envoy_resources.py` | Cluster validator for chart-managed HTTPRoutes, ReferenceGrants, BackendTLSPolicies, Gateways, Secrets, and Services. |
 | `microservices_dict.json` | Microservice catalog reference grouped by backend namespace prefix. |
 
-All command examples in this README assume you are running from the repository root unless a command explicitly changes directory.
+All command examples in this README assume you are running from the repository root unless.
 
 ## What The Chart Renders
 
@@ -53,13 +53,12 @@ The helpers derive these names and namespaces:
 | BackendTLSPolicy name | `<base>-btlsp` |
 | BackendTrafficPolicy name | `<base>-btp` |
 
-Important namespace note: `gateway.namespace` exists in `values.yaml`, but the current templates derive the Gateway namespace through `_helpers.tpl` as `common-gw-<env>`. Treat `common-gw-<env>` as the source of truth unless the chart helpers are intentionally changed.
 
-## Newer Template Behavior
+## Request Timeout, Sticky Session & Gateway
 
 ### HTTPRoute Request Timeout
 
-`templates/httproute.yaml` now renders:
+`templates/httproute.yaml` :
 
 ```yaml
 rules:
@@ -67,13 +66,7 @@ rules:
       request: "60s"
 ```
 
-The value comes from `timeouts.request` and defaults to `60s` in `values.yaml`. The template uses a safe default so older Helm releases that did not previously have a `timeouts` map can still be upgraded with `--reuse-values`.
-
-Set it with Helm:
-
-```bash
---set-string timeouts.request=60s
-```
+The value comes from `timeouts.request` and defaults to `60s` in `values.yaml`. 
 
 Set it through Jenkins:
 
@@ -211,7 +204,6 @@ Supported environment family expansion:
 | `intg` | `intg`, `intgb`, `intgc` |
 | `accp` | `accp`, `accpb`, `accpc` |
 | `prod` | `proda`, `prodb` |
-| Any other value | Treated as one environment name. |
 
 Default backend CA Secret mapping used by the script and expected by the pipelines:
 
@@ -232,7 +224,7 @@ Override or add mappings with repeatable `--backend-secret group:secret` argumen
 
 Use these if you do not want to run the bootstrap script.
 
-Create Gateway namespaces:
+Create Gateway namespaces. Example for `accp`:
 
 ```bash
 for env in accp accpb accpc; do
@@ -276,24 +268,24 @@ spec:
             name: gateway-tls-secret
 ```
 
-Create backend CA Secrets. Example for `accp`:
+Create backend CA Secrets. Example for `accpb`:
 
 ```bash
-kubectl -n annuity-services-accp create secret generic annuity-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n digtran-services-accp create secret generic digtran-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n document-services-accp create secret generic document-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n garwin-int-apps-accp create secret generic garwin-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n garwin-services-accp create secret generic garwin-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n generic-internal-service-accp create secret generic generic-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n lifecad-services-accp create secret generic lifecad-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
-kubectl -n portal-services-accp create secret generic portal-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n annuity-services-accpb create secret generic annuity-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n digtran-services-accpb create secret generic digtran-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n document-services-accpb create secret generic document-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n garwin-int-apps-accpb create secret generic garwin-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n garwin-services-accpb create secret generic garwin-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n generic-internal-service-accpb create secret generic generic-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n lifecad-services-accpb create secret generic lifecad-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
+kubectl -n portal-services-accpb create secret generic portal-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
 ```
 
 Repeat the same backend CA pattern for `accpb` and `accpc` if those namespaces exist.
 
 ## AWS LoadBalancer Annotations
 
-AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service unless that Service is intentionally the LoadBalancer.
+AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service.
 
 Find the Service first:
 
@@ -306,15 +298,15 @@ Example annotation file for the bootstrap script:
 ```bash
 cat > accp-lb-annotations.env <<'EOF_ANNOTATIONS'
 service.beta.kubernetes.io/aws-load-balancer-access-log-enabled=true
-service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name=ven-accp-lb-logging
+service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name=ven-{env}-lb-logging
 service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix=k8s-eg-{env}
 service.beta.kubernetes.io/aws-load-balancer-backend-protocol=ssl
 service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled=true
 service.beta.kubernetes.io/aws-load-balancer-internal=true
-service.beta.kubernetes.io/aws-load-balancer-security-groups=sg-0e0b2323db8b91d02
-service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:895013107628:certificate/31ac8bed-d83b-4219-b4ef-737b44ff2fdd
+service.beta.kubernetes.io/aws-load-balancer-security-groups=sg-xxxxxxxxxxx
+service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:xxxxxxxxxxx:certificate/xxxxxxxxxxx-xxxxx-xxxxx-xxxxx-xxxxxxxxxxx
 service.beta.kubernetes.io/aws-load-balancer-ssl-ports=443
-service.beta.kubernetes.io/aws-load-balancer-subnets=subnet-063c61aa2ac7d7fbc,subnet-03a3db0d2b37568b2
+service.beta.kubernetes.io/aws-load-balancer-subnets=subnet-xxxxxxxxxxx,subnet-xxxxxxxxxxx
 service.beta.kubernetes.io/aws-load-balancer-type=nlb-ip
 EOF_ANNOTATIONS
 ```
