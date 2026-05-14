@@ -1,0 +1,15 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: trust-all-xff
+  namespace: common-gw-accpc
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw-accpc
+  clientIPDetection:
+    xForwardedFor:
+      trustedCIDRs:
+        - 0.0.0.0/0
+        - ::/0

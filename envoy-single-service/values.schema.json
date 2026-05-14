@@ -30,7 +30,8 @@
         "accpb",
         "accpc",
         "proda",
-        "prodb"
+        "prodb",
+        "dr"
       ]
     },
     "backendTrafficPolicy": {

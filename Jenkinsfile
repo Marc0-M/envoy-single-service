@@ -88,6 +88,7 @@ def environmentChoices = [
   'accpc',
   'proda',
   'prodb',
+  'dr',
 ]
 
 def catalogJson = JsonOutput.toJson(microserviceCatalog)
@@ -155,6 +156,9 @@ String getRegion(String targetEnv) {
 }
 
 String getKubeConfig(String targetEnv) {
+  if (targetEnv?.toLowerCase() == 'dr') {
+    return 'dr'
+  }
   if (isProdEnv(targetEnv)) {
     return 'prod'
   }
@@ -503,6 +507,22 @@ pipeline {
               else
                 env -u KUBECONFIG kubectl config view --raw > "$KUBECONFIG"
               fi
+              TARGET_CONTEXT="${KUBE_CONFIG}"
+              if ! kubectl config get-contexts -o name | grep -Fx "$TARGET_CONTEXT" >/dev/null 2>&1; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was not found in the copied kubeconfig."
+                exit 1
+              fi
+              TARGET_CLUSTER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.contexts[0].context.cluster}')"
+              if [ -z "$TARGET_CLUSTER" ]; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was found, but its cluster mapping could not be resolved."
+                exit 1
+              fi
+              TARGET_SERVER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+              echo "Resolved kube context ${TARGET_CONTEXT} -> cluster ${TARGET_CLUSTER} -> server ${TARGET_SERVER}"
               sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' "$KUBECONFIG"
               printf '%s' "$PASSWORD" | helm registry login "$ARTIFACTORY_HOST" \
                 --username "$USERNAME" \
@@ -571,6 +591,22 @@ pipeline {
               else
                 env -u KUBECONFIG kubectl config view --raw > "$KUBECONFIG"
               fi
+              TARGET_CONTEXT="${KUBE_CONFIG}"
+              if ! kubectl config get-contexts -o name | grep -Fx "$TARGET_CONTEXT" >/dev/null 2>&1; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was not found in the copied kubeconfig."
+                exit 1
+              fi
+              TARGET_CLUSTER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.contexts[0].context.cluster}')"
+              if [ -z "$TARGET_CLUSTER" ]; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was found, but its cluster mapping could not be resolved."
+                exit 1
+              fi
+              TARGET_SERVER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+              echo "Resolved kube context ${TARGET_CONTEXT} -> cluster ${TARGET_CLUSTER} -> server ${TARGET_SERVER}"
               sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' "$KUBECONFIG"
               printf '%s' "$PASSWORD" | helm registry login "$ARTIFACTORY_HOST" \
                 --username "$USERNAME" \

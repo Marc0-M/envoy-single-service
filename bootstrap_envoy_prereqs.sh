@@ -9,6 +9,7 @@ Creates, per subenvironment:
   - common-gw-<env> namespace
   - gateway TLS Secret in common-gw-<env>
   - Gateway gw-<env> in common-gw-<env>
+  - optional ClientTrafficPolicy in common-gw-<env> for client IP detection
   - backend CA Secrets in backend namespaces such as annuity-services-<env>
 
 Usage:
@@ -20,7 +21,7 @@ Usage:
     --context accp
 
 Common options:
-  --env-family <dev|intg|accp|prod|single-env>
+  --env-family <dev|intg|accp|prod|dr|single-env>
   --envs <comma-list>                 Override subenvironment expansion.
   --context <kubectl-context>          Optional kubectl context.
   --tls-crt <path>                     Gateway listener certificate file.
@@ -29,6 +30,11 @@ Common options:
   --gateway-class <name>               Default: envoy-gateway.
   --gateway-secret <name>              Default: gateway-tls-secret.
   --gateway-name-prefix <prefix>       Default: gw. Creates <prefix>-<env>.
+  --enable-client-ip-detection         Create ClientTrafficPolicy for the shared Gateway.
+  --client-traffic-policy-name <name>  Default: client-ip-detection.
+  --client-ip-trusted-hops <n>         Use X-Forwarded-For client IP detection with N trusted hops. Default: 1.
+  --client-ip-header <name>            Use a trusted custom header instead of X-Forwarded-For.
+  --client-ip-fail-closed              For custom-header mode, return 403 when client IP detection fails.
   --create-backend-namespaces          Create backend namespaces if missing. Default: skip missing.
   --backend-secret <group:secret>      Add/override backend CA secret mapping. Repeatable.
   --annotation-file <path>             Optional file of service annotation key=value lines.
@@ -83,6 +89,11 @@ CA_CRT=""
 GATEWAY_CLASS="envoy-gateway"
 GATEWAY_SECRET="gateway-tls-secret"
 GATEWAY_NAME_PREFIX="gw"
+ENABLE_CLIENT_IP_DETECTION=false
+CLIENT_TRAFFIC_POLICY_NAME="client-ip-detection"
+CLIENT_IP_TRUSTED_HOPS="1"
+CLIENT_IP_HEADER=""
+CLIENT_IP_FAIL_CLOSED=false
 CREATE_BACKEND_NAMESPACES=false
 ANNOTATION_FILE=""
 DRY_RUN=false
@@ -119,6 +130,16 @@ while [[ $# -gt 0 ]]; do
       GATEWAY_SECRET="${2:-}"; shift 2 ;;
     --gateway-name-prefix)
       GATEWAY_NAME_PREFIX="${2:-}"; shift 2 ;;
+    --enable-client-ip-detection)
+      ENABLE_CLIENT_IP_DETECTION=true; shift ;;
+    --client-traffic-policy-name)
+      CLIENT_TRAFFIC_POLICY_NAME="${2:-}"; shift 2 ;;
+    --client-ip-trusted-hops)
+      CLIENT_IP_TRUSTED_HOPS="${2:-}"; shift 2 ;;
+    --client-ip-header)
+      CLIENT_IP_HEADER="${2:-}"; shift 2 ;;
+    --client-ip-fail-closed)
+      CLIENT_IP_FAIL_CLOSED=true; shift ;;
     --create-backend-namespaces)
       CREATE_BACKEND_NAMESPACES=true; shift ;;
     --backend-secret)
@@ -145,6 +166,9 @@ done
 [[ -f "$CA_CRT" ]] || die "CA cert file not found: $CA_CRT"
 if [[ -n "$ANNOTATION_FILE" && ! -f "$ANNOTATION_FILE" ]]; then
   die "Annotation file not found: $ANNOTATION_FILE"
+fi
+if [[ -n "$CLIENT_IP_TRUSTED_HOPS" && ! "$CLIENT_IP_TRUSTED_HOPS" =~ ^[0-9]+$ ]]; then
+  die "--client-ip-trusted-hops must be a non-negative integer."
 fi
 
 KUBE_ARGS=()
@@ -212,6 +236,51 @@ spec:
             kind: Secret
             name: ${GATEWAY_SECRET}
 YAML
+}
+
+create_client_traffic_policy() {
+  local env_name="$1"
+  local namespace="common-gw-${env_name}"
+  local gateway_name="${GATEWAY_NAME_PREFIX}-${env_name}"
+
+  [[ "$ENABLE_CLIENT_IP_DETECTION" == true ]] || return 0
+
+  log "Ensuring ClientTrafficPolicy ${namespace}/${CLIENT_TRAFFIC_POLICY_NAME} for Gateway ${gateway_name}"
+
+  if [[ -n "$CLIENT_IP_HEADER" ]]; then
+    cat <<YAML | apply_manifest
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: ${CLIENT_TRAFFIC_POLICY_NAME}
+  namespace: ${namespace}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ${gateway_name}
+  clientIPDetection:
+    customHeader:
+      name: ${CLIENT_IP_HEADER}
+      failClosed: ${CLIENT_IP_FAIL_CLOSED}
+YAML
+  else
+    cat <<YAML | apply_manifest
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: ClientTrafficPolicy
+metadata:
+  name: ${CLIENT_TRAFFIC_POLICY_NAME}
+  namespace: ${namespace}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: ${gateway_name}
+  clientIPDetection:
+    xForwardedFor:
+      numTrustedHops: ${CLIENT_IP_TRUSTED_HOPS}
+YAML
+  fi
 }
 
 create_backend_ca_secret() {
@@ -288,6 +357,7 @@ expand_envs() {
     intg) printf '%s\n' intg intgb intgc ;;
     accp) printf '%s\n' accp accpb accpc ;;
     prod) printf '%s\n' proda prodb ;;
+    dr) printf '%s\n' dr ;;
     *) printf '%s\n' "$env_family" ;;
   esac
 }
@@ -302,12 +372,20 @@ log "Target environments: ${TARGET_ENVS[*]}"
 if [[ "$DRY_RUN" == true ]]; then
   warn 'Dry-run mode enabled; no resources will be persisted.'
 fi
+if [[ "$ENABLE_CLIENT_IP_DETECTION" == true ]]; then
+  if [[ -n "$CLIENT_IP_HEADER" ]]; then
+    log "Client IP detection enabled with custom header ${CLIENT_IP_HEADER}"
+  else
+    log "Client IP detection enabled with X-Forwarded-For trusted hops ${CLIENT_IP_TRUSTED_HOPS}"
+  fi
+fi
 
 for env_name in "${TARGET_ENVS[@]}"; do
   gateway_namespace="common-gw-${env_name}"
   create_namespace "$gateway_namespace"
   create_gateway_tls_secret "$gateway_namespace"
   create_gateway "$env_name"
+  create_client_traffic_policy "$env_name"
 
   for mapping in "${BACKEND_SECRET_MAPPINGS[@]}"; do
     [[ "$mapping" == *:* ]] || die "Invalid --backend-secret mapping: ${mapping}. Expected group:secret."

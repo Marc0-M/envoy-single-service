@@ -1,0 +1,19 @@
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyExtensionPolicy
+metadata:
+  name: copy-xff-to-xoff
+  namespace: common-gw-dr
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: gw-dr
+  lua:
+    - type: Inline
+      inline: |
+        function envoy_on_request(request_handle)
+          local xff = request_handle:headers():get("x-forwarded-for")
+          if xff ~= nil and xff ~= "" then
+            request_handle:headers():replace("x-original-forwarded-for", xff)
+          end
+        end

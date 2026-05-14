@@ -1,9 +1,10 @@
 
 """Validate envoy-single-service resources created by the Jenkins pipeline.
 
-The script discovers chart-created HTTPRoutes, ReferenceGrants, and
-BackendTLSPolicies across the cluster, validates their referenced Gateways,
-Secrets, and Services, and reports whether the installed resources look healthy.
+The script discovers chart-created HTTPRoutes, ReferenceGrants,
+BackendTLSPolicies, BackendTrafficPolicies, and optional Gateways across the
+cluster, validates their referenced Gateways, Secrets, and Services, and
+reports whether the installed resources look healthy.
 
 Examples:
   ./validate_envoy_resources.py
@@ -48,6 +49,42 @@ def run_kubectl(args: Sequence[str]) -> dict:
         sys.exit(2)
 
 
+def run_kubectl_optional(args: Sequence[str]) -> dict:
+    try:
+        completed = subprocess.run(
+            ["kubectl", *args],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        command = " ".join(args)
+        stderr = exc.stderr.strip() or exc.stdout.strip() or str(exc)
+        optional_errors = (
+            "the server doesn't have a resource type",
+            "unable to recognize",
+            "no matches for kind",
+            "NotFound",
+        )
+        if any(fragment in stderr for fragment in optional_errors):
+            print(
+                f"INFO: kubectl {command} skipped because the resource type is not available in this cluster.",
+                file=sys.stderr,
+            )
+            return {"apiVersion": "v1", "items": []}
+        print(f"ERROR: kubectl {command} failed: {stderr}", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        return json.loads(completed.stdout)
+    except json.JSONDecodeError as exc:
+        print(
+            f"ERROR: failed to parse kubectl {' '.join(args)} JSON output: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def suffix_strip(value: str, suffix: str) -> str:
     return value[: -len(suffix)] if value.endswith(suffix) else value
 
@@ -59,6 +96,8 @@ def base_name(kind: str, name: str) -> str:
         return suffix_strip(name, "-refgrant")
     if kind == "BackendTLSPolicy":
         return suffix_strip(name, "-btlsp")
+    if kind == "BackendTrafficPolicy":
+        return suffix_strip(name, "-btp")
     return name
 
 
@@ -134,19 +173,29 @@ def get_cluster_data(context: Optional[str]) -> Dict[str, dict]:
         "httproutes": run_kubectl([*context_args, "get", "httproutes.gateway.networking.k8s.io", "-A", "-o", "json"]),
         "referencegrants": run_kubectl([*context_args, "get", "referencegrants.gateway.networking.k8s.io", "-A", "-o", "json"]),
         "backendtlspolicies": run_kubectl([*context_args, "get", "backendtlspolicies.gateway.networking.k8s.io", "-A", "-o", "json"]),
+        "backendtrafficpolicies": run_kubectl_optional([*context_args, "get", "backendtrafficpolicies.gateway.envoyproxy.io", "-A", "-o", "json"]),
         "gateways": run_kubectl([*context_args, "get", "gateways.gateway.networking.k8s.io", "-A", "-o", "json"]),
         "services": run_kubectl([*context_args, "get", "services", "-A", "-o", "json"]),
         "secrets": run_kubectl([*context_args, "get", "secrets", "-A", "-o", "json"]),
     }
 
-
 def discover_releases(data: Dict[str, dict], env_filter: Optional[str]) -> Dict[str, dict]:
-    releases: Dict[str, dict] = defaultdict(lambda: {"route": None, "refgrant": None, "btlsp": None})
+    releases: Dict[str, dict] = defaultdict(
+        lambda: {
+            "route": None,
+            "refgrant": None,
+            "btlsp": None,
+            "btp": None,
+            "gateway": None,
+        }
+    )
 
     resources = [
         ("route", "HTTPRoute", data["httproutes"].get("items", [])),
         ("refgrant", "ReferenceGrant", data["referencegrants"].get("items", [])),
         ("btlsp", "BackendTLSPolicy", data["backendtlspolicies"].get("items", [])),
+        ("btp", "BackendTrafficPolicy", data["backendtrafficpolicies"].get("items", [])),
+        ("gateway", "Gateway", data["gateways"].get("items", [])),
     ]
 
     for resource_key, kind, items in resources:
@@ -160,7 +209,7 @@ def discover_releases(data: Dict[str, dict], env_filter: Optional[str]) -> Dict[
 
 
 def first_resource(release: dict) -> Optional[dict]:
-    for key in ("btlsp", "refgrant", "route"):
+    for key in ("btlsp", "refgrant", "route", "btp", "gateway"):
         resource = release.get(key)
         if resource:
             return resource
@@ -184,6 +233,21 @@ def infer_env(release: dict) -> str:
     namespace = backend_namespace(release)
     if "-" in namespace:
         return namespace.rsplit("-", 1)[-1]
+    return ""
+
+
+def infer_group(release: dict) -> str:
+    namespace = backend_namespace(release)
+    if namespace and namespace != "<unknown>" and "-" in namespace:
+        return namespace.rsplit("-", 1)[0]
+
+    resource = first_resource(release)
+    if resource:
+        app_name = resource.get("metadata", {}).get("labels", {}).get(APP_NAME_LABEL, "")
+        env_name = infer_env(release)
+        if app_name and env_name and app_name.endswith(f"-{env_name}"):
+            return app_name[: -(len(env_name) + 1)].rsplit("-", 1)[0]
+
     return ""
 
 
@@ -238,8 +302,20 @@ def backend_host(release: dict) -> str:
     return btlsp.get("spec", {}).get("validation", {}).get("hostname", "-")
 
 
-def crd_count(release: dict) -> int:
+def core_resource_count(release: dict) -> int:
     return sum(1 for key in ("route", "refgrant", "btlsp") if release.get(key))
+
+
+def resource_present(value: Optional[dict]) -> str:
+    return "yes" if value else "no"
+
+
+def session_affinity_state(release: dict) -> str:
+    if release.get("btp"):
+        return "enabled"
+    if infer_group(release) == "garwin-int-apps":
+        return "missing-required"
+    return "-"
 
 
 def summarize_status(issue_messages: Sequence[str]) -> str:
@@ -253,8 +329,10 @@ def summarize_status(issue_messages: Sequence[str]) -> str:
 def print_inventory(namespace_groups: Dict[str, List[dict]]) -> None:
     headers = [
         ("MICROSERVICE", 34),
-        ("ALL_3_CRDS", 10),
-        ("CRDS", 5),
+        ("CORE", 6),
+        ("BTP", 5),
+        ("STICKY", 16),
+        ("CHART_GW", 8),
         ("GATEWAY", 22),
         ("ROUTE_URI", 26),
         ("BACKEND_HOST", 42),
@@ -270,8 +348,10 @@ def print_inventory(namespace_groups: Dict[str, List[dict]]) -> None:
         for entry in sorted(namespace_groups[namespace], key=lambda item: item["microservice"]):
             row = [
                 entry["microservice"][:34].ljust(34),
-                ("yes" if entry["all_three"] else "no").ljust(10),
-                f"{entry['crd_count']}/3".ljust(5),
+                f"{entry['core_count']}/3".ljust(6),
+                entry["btp"].ljust(5),
+                entry["sticky"][:16].ljust(16),
+                entry["chart_gateway"].ljust(8),
                 entry["gateway"][:22].ljust(22),
                 entry["route_uri"][:26].ljust(26),
                 entry["backend_host"][:42].ljust(42),
@@ -293,6 +373,8 @@ def validate_release(
     route = release.get("route")
     refgrant = release.get("refgrant")
     btlsp = release.get("btlsp")
+    btp = release.get("btp")
+    chart_gateway = release.get("gateway")
 
     if not route:
         issues.append(format_issue("FAIL", f"{release_key}: missing HTTPRoute"))
@@ -306,6 +388,27 @@ def validate_release(
 
     route_ns = route["metadata"]["namespace"]
     route_name = route["metadata"]["name"]
+    group_name = infer_group(release)
+
+    if chart_gateway:
+        gateway_meta = chart_gateway.get("metadata", {})
+        gateway_name = gateway_meta.get("name")
+        gateway_ns = gateway_meta.get("namespace")
+        ok.append(f"{release_key}: chart-managed Gateway exists at {gateway_ns}/{gateway_name}")
+        route_targets_chart_gateway = any(
+            parent_ref.get("name") == gateway_name
+            and parent_ref.get("namespace", route_ns) == gateway_ns
+            for parent_ref in route.get("spec", {}).get("parentRefs", [])
+        )
+        if route_targets_chart_gateway:
+            ok.append(f"{release_key}: HTTPRoute points to chart-managed Gateway {gateway_ns}/{gateway_name}")
+        else:
+            issues.append(
+                format_issue(
+                    "WARN",
+                    f"{release_key}: chart-managed Gateway {gateway_ns}/{gateway_name} exists but is not referenced by the HTTPRoute",
+                )
+            )
 
     parent_refs = route.get("spec", {}).get("parentRefs", [])
     if not parent_refs:
@@ -511,6 +614,111 @@ def validate_release(
     else:
         issues.append(format_issue("WARN", f"{release_key}: BackendTLSPolicy not found (TLS may be disabled)"))
 
+    if btp:
+        btp_ns = btp["metadata"]["namespace"]
+        ok.append(f"{release_key}: BackendTrafficPolicy exists in {btp_ns}")
+
+        if btp_ns != route_ns:
+            issues.append(
+                format_issue(
+                    "FAIL",
+                    f"{release_key}: BackendTrafficPolicy namespace {btp_ns} does not match HTTPRoute namespace {route_ns}",
+                )
+            )
+
+        target_refs = btp.get("spec", {}).get("targetRefs", [])
+        route_target_matches = any(
+            target_ref.get("kind") == "HTTPRoute" and target_ref.get("name") == route_name
+            for target_ref in target_refs
+        )
+        if route_target_matches:
+            ok.append(f"{release_key}: BackendTrafficPolicy targets HTTPRoute {route_ns}/{route_name}")
+        else:
+            issues.append(
+                format_issue(
+                    "FAIL",
+                    f"{release_key}: BackendTrafficPolicy does not target HTTPRoute {route_ns}/{route_name}",
+                )
+            )
+
+        load_balancer = btp.get("spec", {}).get("loadBalancer", {})
+        if load_balancer.get("type") == "ConsistentHash":
+            ok.append(f"{release_key}: BackendTrafficPolicy loadBalancer.type=ConsistentHash")
+        else:
+            issues.append(
+                format_issue(
+                    "WARN",
+                    f"{release_key}: BackendTrafficPolicy loadBalancer.type is {load_balancer.get('type')!r}, expected 'ConsistentHash' for sticky routing",
+                )
+            )
+
+        consistent_hash = load_balancer.get("consistentHash", {})
+        if consistent_hash.get("type") == "Cookie":
+            ok.append(f"{release_key}: BackendTrafficPolicy consistentHash.type=Cookie")
+        else:
+            issues.append(
+                format_issue(
+                    "WARN",
+                    f"{release_key}: BackendTrafficPolicy consistentHash.type is {consistent_hash.get('type')!r}, expected 'Cookie' for session affinity",
+                )
+            )
+
+        cookie = consistent_hash.get("cookie", {})
+        cookie_name = cookie.get("name")
+        if cookie_name:
+            ok.append(f"{release_key}: BackendTrafficPolicy cookie name is {cookie_name}")
+        else:
+            issues.append(format_issue("FAIL", f"{release_key}: BackendTrafficPolicy cookie.name is missing"))
+
+        cookie_ttl = cookie.get("ttl")
+        if cookie_ttl:
+            ok.append(f"{release_key}: BackendTrafficPolicy cookie ttl is {cookie_ttl}")
+        else:
+            issues.append(format_issue("WARN", f"{release_key}: BackendTrafficPolicy cookie.ttl is missing"))
+
+        ancestors = btp.get("status", {}).get("ancestors", [])
+        if ancestors:
+            accepted_conditions = [
+                get_condition(entry.get("conditions", []), "Accepted") for entry in ancestors
+            ]
+            accepted_conditions = [condition for condition in accepted_conditions if condition]
+            if accepted_conditions:
+                if any(condition.get("status") == "True" for condition in accepted_conditions):
+                    ok.append(f"{release_key}: BackendTrafficPolicy Accepted=True")
+                else:
+                    condition = accepted_conditions[0]
+                    issues.append(
+                        format_issue(
+                            "FAIL",
+                            f"{release_key}: BackendTrafficPolicy Accepted is not True ({condition.get('reason')}: {condition.get('message')})",
+                        )
+                    )
+
+            resolved_conditions = [
+                get_condition(entry.get("conditions", []), "ResolvedRefs") for entry in ancestors
+            ]
+            resolved_conditions = [condition for condition in resolved_conditions if condition]
+            if resolved_conditions:
+                if any(condition.get("status") == "True" for condition in resolved_conditions):
+                    ok.append(f"{release_key}: BackendTrafficPolicy ResolvedRefs=True")
+                else:
+                    condition = resolved_conditions[0]
+                    issues.append(
+                        format_issue(
+                            "FAIL",
+                            f"{release_key}: BackendTrafficPolicy ResolvedRefs is not True ({condition.get('reason')}: {condition.get('message')})",
+                        )
+                    )
+        else:
+            issues.append(format_issue("WARN", f"{release_key}: BackendTrafficPolicy has no status.ancestors yet"))
+    elif group_name == "garwin-int-apps":
+        issues.append(
+            format_issue(
+                "WARN",
+                f"{release_key}: garwin-int-apps microservices should enable BackendTrafficPolicy for session affinity, but no BackendTrafficPolicy was found",
+            )
+        )
+
     return ok, issues
 
 
@@ -536,6 +744,7 @@ def main() -> int:
 
     namespace_groups: Dict[str, List[dict]] = defaultdict(list)
     detailed_issues: List[Tuple[str, List[str], List[str]]] = []
+    session_affinity_reminders: List[Tuple[str, str, str]] = []
 
     for release_key in sorted(releases):
         checked += 1
@@ -550,14 +759,25 @@ def main() -> int:
         namespace_groups[backend_namespace(releases[release_key])].append(
             {
                 "microservice": infer_microservice_name(release_key, releases[release_key]),
-                "all_three": crd_count(releases[release_key]) == 3,
-                "crd_count": crd_count(releases[release_key]),
+                "core_count": core_resource_count(releases[release_key]),
+                "btp": resource_present(releases[release_key].get("btp")),
+                "sticky": session_affinity_state(releases[release_key]),
+                "chart_gateway": resource_present(releases[release_key].get("gateway")),
                 "gateway": gateway_names(releases[release_key]),
                 "route_uri": route_uris(releases[release_key]),
                 "backend_host": backend_host(releases[release_key]),
                 "status": summarize_status(issue_messages),
             }
         )
+
+        if infer_group(releases[release_key]) == "garwin-int-apps" and not releases[release_key].get("btp"):
+            session_affinity_reminders.append(
+                (
+                    release_key,
+                    backend_namespace(releases[release_key]),
+                    infer_microservice_name(release_key, releases[release_key]),
+                )
+            )
 
         if issue_messages or args.export_ok:
             detailed_issues.append((release_key, ok_messages, issue_messages))
@@ -581,6 +801,15 @@ def main() -> int:
                 print(message)
             if args.export_ok and not issue_messages:
                 print("All checks passed.")
+
+    if session_affinity_reminders:
+        print("\nSession Affinity Reminders")
+        print(
+            "The following garwin-int-apps releases do not have BackendTrafficPolicy resources. "
+            "These microservices should enable session affinity."
+        )
+        for release_key, namespace, microservice in session_affinity_reminders:
+            print(f"- {release_key} ({namespace}, microservice={microservice})")
 
     print("\nSummary")
     print(f"Checked releases: {checked}")

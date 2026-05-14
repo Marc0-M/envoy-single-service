@@ -9,6 +9,7 @@ def environmentChoices = [
   'intg',
   'accp',
   'prod',
+  'dr',
 ]
 
 boolean isProdEnv(String targetEnv) {
@@ -36,6 +37,9 @@ String getRegion(String targetEnv) {
 }
 
 String getKubeConfig(String targetEnv) {
+  if (targetEnv?.toLowerCase() == 'dr') {
+    return 'dr'
+  }
   if (isProdEnv(targetEnv)) {
     return 'prod'
   }
@@ -81,6 +85,9 @@ List<String> getTargetEnvironments(String targetEnv) {
   }
   if (normalizedEnv == 'prod' || normalizedEnv.startsWith('prod')) {
     return ['proda', 'prodb']
+  }
+  if (normalizedEnv == 'dr') {
+    return ['dr']
   }
 
   return normalizedEnv ? [normalizedEnv] : []
@@ -252,7 +259,7 @@ properties([
     choice(
       name: 'ENV',
       choices: environmentChoices.join('\n'),
-      description: 'Target environment family. Example: dev upgrades releases for dev, devb, and devc in the same cluster context.'
+      description: 'Target environment family or single environment. Example: dev upgrades dev, devb, and devc. Use dr separately because it runs in us-west-2 while proda and prodb use us-east-1.'
     ),
     string(
       name: 'CHART_VERSION',
@@ -366,6 +373,22 @@ pipeline {
               else
                 env -u KUBECONFIG kubectl config view --raw > "$KUBECONFIG"
               fi
+              TARGET_CONTEXT="${KUBE_CONTEXT}"
+              if ! kubectl config get-contexts -o name | grep -Fx "$TARGET_CONTEXT" >/dev/null 2>&1; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was not found in the copied kubeconfig."
+                exit 1
+              fi
+              TARGET_CLUSTER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.contexts[0].context.cluster}')"
+              if [ -z "$TARGET_CLUSTER" ]; then
+                echo "Available kube contexts in copied kubeconfig:"
+                kubectl config get-contexts -o name || true
+                echo "ERROR: kube context '$TARGET_CONTEXT' was found, but its cluster mapping could not be resolved."
+                exit 1
+              fi
+              TARGET_SERVER="$(kubectl --context="$TARGET_CONTEXT" config view --raw --minify -o jsonpath='{.clusters[0].cluster.server}')"
+              echo "Resolved kube context ${TARGET_CONTEXT} -> cluster ${TARGET_CLUSTER} -> server ${TARGET_SERVER}"
               sed -i 's#client.authentication.k8s.io/v1alpha1#client.authentication.k8s.io/v1beta1#g' "$KUBECONFIG"
               printf '%s' "$PASSWORD" | helm registry login "$ARTIFACTORY_HOST" \
                 --username "$USERNAME" \
