@@ -22,6 +22,7 @@ This repository contains the chart, two Jenkins pipelines, a prerequisite bootst
 | `Jenkinsfile-bulk-upgrade` | Bulk upgrade pipeline for already-installed `envoy-single-service` releases. Uses `helm upgrade --reuse-values`. |
 | `bootstrap_envoy_prereqs.sh` | Optional root-level script to create Gateway namespaces, TLS Secrets, Gateways, backend CA Secrets, and optional Service annotations. |
 | `validate_envoy_resources.py` | Cluster validator for chart-managed HTTPRoutes, ReferenceGrants, BackendTLSPolicies, Gateways, Secrets, and Services. |
+| `shared-gateway-manifests/` | Shared Gateway-level policies that must be applied per environment when backend services need correct forwarded client IP headers. |
 | `microservices_dict.json` | Microservice catalog reference grouped by backend namespace prefix. |
 
 All command examples in this README assume you are running from the repository root unless.
@@ -130,6 +131,7 @@ Required cluster pieces:
 | Envoy Gateway | Envoy Gateway controller running and reconciling `GatewayClass envoy-gateway`. |
 | Gateway namespace | `common-gw-<env>`. |
 | Shared Gateway | `gw-<env>` in `common-gw-<env>` with HTTPS listener named `https`. |
+| Shared Gateway manifests | Apply `shared-gateway-manifests/<env>/01-clienttrafficpolicy.yaml` and `shared-gateway-manifests/<env>/02-envoyextensionpolicy.yaml` when services need trusted client IP forwarding headers. |
 | Gateway TLS Secret | `gateway-tls-secret` in `common-gw-<env>`. |
 | Backend namespace | `<group>-<env>`. |
 | Backend Service | Service exists in `<group>-<env>`, normally `service-<microservice>`. |
@@ -156,6 +158,66 @@ kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io || true
 ```
 
 The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`.
+
+## Shared Gateway Manifests Prerequisite
+
+The `shared-gateway-manifests/` folder belongs to the shared Gateway layer, not to an individual microservice route. Apply these manifests before deploying routes that depend on correct client IP forwarding behavior.
+
+Each supported environment has its own folder:
+
+```text
+shared-gateway-manifests/dev/
+shared-gateway-manifests/devb/
+shared-gateway-manifests/devc/
+shared-gateway-manifests/intg/
+shared-gateway-manifests/intgb/
+shared-gateway-manifests/intgc/
+shared-gateway-manifests/accp/
+shared-gateway-manifests/accpb/
+shared-gateway-manifests/accpc/
+shared-gateway-manifests/proda/
+shared-gateway-manifests/prodb/
+shared-gateway-manifests/dr/
+```
+
+Each folder contains two Gateway-level policies:
+
+| File | Resource | Reason |
+| --- | --- | --- |
+| `01-clienttrafficpolicy.yaml` | `ClientTrafficPolicy` | Tells Envoy Gateway to trust the incoming `X-Forwarded-For` header on the shared Gateway. Without this, backend services may see the Envoy/NLB/proxy address instead of the real caller chain. |
+| `02-envoyextensionpolicy.yaml` | `EnvoyExtensionPolicy` | Copies `X-Forwarded-For` into `X-Original-Forwarded-For` using a Gateway-wide Lua filter, so backend services can read the original forwarded chain from a stable header. |
+
+This is a prerequisite because `envoy-single-service` creates per-service resources such as `HTTPRoute`, `ReferenceGrant`, and optional backend policies. It does not configure Gateway-wide client IP handling. If these shared manifests are missing, the route can still work, but applications and logs that depend on original client IP headers can be wrong or incomplete.
+
+Apply them in this order for the target environment:
+
+```bash
+kubectl apply -f shared-gateway-manifests/<env>/01-clienttrafficpolicy.yaml
+kubectl apply -f shared-gateway-manifests/<env>/02-envoyextensionpolicy.yaml
+```
+
+Example for `accp`:
+
+```bash
+kubectl apply -f shared-gateway-manifests/accp/01-clienttrafficpolicy.yaml
+kubectl apply -f shared-gateway-manifests/accp/02-envoyextensionpolicy.yaml
+```
+
+Verify the policies:
+
+```bash
+kubectl -n common-gw-<env> get clienttrafficpolicy trust-all-xff -o yaml
+kubectl -n common-gw-<env> get envoyextensionpolicy copy-xff-to-xoff -o yaml
+```
+
+After applying them, test a routed URL and confirm the backend receives both:
+
+```text
+X-Forwarded-For
+X-Original-Forwarded-For
+```
+
+Important: these manifests target a specific shared Gateway name and namespace, usually `gw-<env>` in `common-gw-<env>`. If your Gateway name is customized, update the `targetRefs.name` value before applying.
 
 ## Prerequisite Bootstrap Script
 
