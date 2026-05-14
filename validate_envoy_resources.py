@@ -1,15 +1,7 @@
 
-"""Validate envoy-single-service resources created by the Jenkins pipeline.
-
-The script discovers chart-created HTTPRoutes, ReferenceGrants,
-BackendTLSPolicies, BackendTrafficPolicies, and optional Gateways across the
-cluster, validates their referenced Gateways, Secrets, and Services, and
-reports whether the installed resources look healthy.
-
-Examples:
-  ./validate_envoy_resources.py
-  ./validate_envoy_resources.py --env devb
-  ./validate_envoy_resources.py --context dev
+"""
+Example:
+  ./validate_envoy_resources.py --env devb
 """
 
 import argparse
