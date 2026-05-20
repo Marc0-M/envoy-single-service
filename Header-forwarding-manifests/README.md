@@ -1,4 +1,4 @@
-# Shared Gateway Manifests
+# Header Forwarding Manifests
 
 This folder contains reusable Gateway-level manifests for:
 - `dev`
@@ -24,7 +24,7 @@ Each environment folder contains:
 Recommended apply order:
 1. Confirm the target cluster/context and review `00-envoyproxy.yaml` values for that environment.
 2. Apply `00-envoyproxy.yaml`.
-3. Attach the `EnvoyProxy` to the shared `Gateway`.
+3. Attach the `EnvoyProxy` to the shared `Gateway` with `Gateway.spec.infrastructure.parametersRef`.
 4. Apply `01-clienttrafficpolicy.yaml`.
 5. Apply `02-envoyextensionpolicy.yaml`.
 6. Test a valid routed URL and confirm the backend receives both `X-Forwarded-For` and `X-Original-Forwarded-For`.
@@ -44,12 +44,14 @@ kubectl -n common-gw-<env> patch gateway gw-<env> --type merge -p '{
 }'
 ```
 
+Do not attach these `EnvoyProxy` resources to the `GatewayClass`. They are environment-specific because the AWS annotations differ by Gateway and environment.
+
 Apply example:
 ```bash
-kubectl apply -f shared-gateway-manifests/<env>/00-envoyproxy.yaml
+kubectl apply -f Header-forwarding-manifests/<env>/00-envoyproxy.yaml
 kubectl -n common-gw-<env> patch gateway gw-<env> --type merge -p '{"spec":{"infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io","kind":"EnvoyProxy","name":"envoy-aws-nlb-service-<env>"}}}}'
-kubectl apply -f shared-gateway-manifests/<env>/01-clienttrafficpolicy.yaml
-kubectl apply -f shared-gateway-manifests/<env>/02-envoyextensionpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/<env>/01-clienttrafficpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/<env>/02-envoyextensionpolicy.yaml
 ```
 
 Helpful lookups:
@@ -80,4 +82,4 @@ Notes:
 - All environment folders now include concrete AWS NLB annotation values captured for this repo.
 - `prodb` currently uses the same values as `proda`; update it if that subenvironment has separate NLB annotation values.
 - `dr` uses `us-west-2` annotation values and is intentionally separate from `proda` and `prodb`.
-- If the generated Service does not show the expected annotations after patching the Gateway, check Gateway status and Envoy Gateway controller logs. Use `annotate_envoy_services_preserve_client_ip.sh` only as a temporary repair helper, not as the permanent source of truth.
+- If the generated Service does not show the expected annotations after patching the Gateway, check Gateway status and Envoy Gateway controller logs.

@@ -159,7 +159,7 @@ kubectl get crd envoyextensionpolicies.gateway.envoyproxy.io
 kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io || true
 ```
 
-The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`. The `EnvoyProxy`, `ClientTrafficPolicy`, and `EnvoyExtensionPolicy` CRDs are required for the shared Gateway manifests.
+The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`. The `EnvoyProxy`, `ClientTrafficPolicy`, and `EnvoyExtensionPolicy` CRDs are required for the header forwarding manifests.
 
 ## Header Forwarding Manifests Prerequisite
 
@@ -233,46 +233,9 @@ Important: these manifests target a specific shared Gateway name and namespace, 
 
 If the generated Envoy Service already exists before attaching `00-envoyproxy.yaml`, Envoy Gateway should reconcile the Service annotations after the Gateway is patched. If it does not, check the Gateway status and Envoy Gateway controller logs before manually editing the Service.
 
-## Prerequisite Bootstrap Script
+## Manual Prerequisite Commands
 
-The root script can create or refresh the common Gateway prerequisites for an environment family.
-
-This script does not apply the `shared-gateway-manifests/<env>/` files. Run the bootstrap script first when namespaces, TLS Secrets, Gateways, or backend CA Secrets are missing, then apply the shared Gateway manifests for NLB annotations and forwarded header behavior.
-
-Dry-run first:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt \
-  --dry-run
-```
-
-Apply for the `accp` family, which expands to `accp`, `accpb`, and `accpc`:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt
-```
-
-If backend namespaces do not exist yet and should be created by the script:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt \
-  --create-backend-namespaces
-```
+All shared Gateway prerequisites are handled manually. Use these commands as examples and adjust the environment family before applying.
 
 Supported environment family expansion:
 
@@ -284,7 +247,7 @@ Supported environment family expansion:
 | `prod` | `proda`, `prodb` |
 | `dr` | `dr` |
 
-Default backend CA Secret mapping used by the script and expected by the pipelines:
+Default backend CA Secret mapping expected by the pipelines:
 
 | Backend namespace prefix | Secret name |
 | --- | --- |
@@ -297,11 +260,7 @@ Default backend CA Secret mapping used by the script and expected by the pipelin
 | `lifecad-services` | `lifecad-backend-ca` |
 | `portal-services` | `portal-backend-ca` |
 
-Override or add mappings with repeatable `--backend-secret group:secret` arguments.
-
-## Manual Prerequisite Commands
-
-Use these if you do not want to run the bootstrap script.
+If a group uses a non-standard CA Secret name, make sure the Jenkins selection passes the matching `backend.caSecretName`.
 
 Create Gateway namespaces. Example for `accp`:
 
@@ -367,10 +326,10 @@ Repeat the same backend CA pattern for the other subenvironments in the family i
 AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service. In this repo, the normal source of truth is the per-environment `EnvoyProxy` manifest:
 
 ```text
-shared-gateway-manifests/<env>/00-envoyproxy.yaml
+Header-forwarding-manifests/<env>/00-envoyproxy.yaml
 ```
 
-Attach that `EnvoyProxy` to the shared Gateway with `spec.infrastructure.parametersRef`. Envoy Gateway then applies the annotations to the generated Service in `envoy-system`.
+Attach that `EnvoyProxy` to the shared Gateway with `Gateway.spec.infrastructure.parametersRef`. Envoy Gateway then applies the annotations to the generated Service in `envoy-system`.
 
 Required annotation set used by the shared manifests:
 
@@ -391,60 +350,12 @@ service.beta.kubernetes.io/aws-load-balancer-target-group-attributes
 
 `service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true` is required for preserving the direct client IP that reaches the NLB target. The `ClientTrafficPolicy` and `EnvoyExtensionPolicy` then make that forwarded chain available to applications through `X-Forwarded-For` and `X-Original-Forwarded-For`.
 
-Find the Service first:
+Verify the generated Envoy Service after attaching the `EnvoyProxy` at Gateway level:
 
 ```bash
-kubectl get svc -A | grep -E 'LoadBalancer|envoy|gateway'
+kubectl get svc -n envoy-system | grep "common-gw-<env>"
+kubectl get svc -n envoy-system <generated-envoy-service-name> -o yaml | grep -A 14 annotations
 ```
-
-Temporary repair fallback for already-generated Services:
-
-```bash
-./annotate_envoy_services_preserve_client_ip.sh --dry-run
-./annotate_envoy_services_preserve_client_ip.sh
-```
-
-That helper scans `envoy-system`, selects only Services that already have the standard AWS NLB annotations used by this repo, and adds or updates:
-
-```text
-service.beta.kubernetes.io/aws-load-balancer-target-group-attributes=preserve_client_ip.enabled=true
-```
-
-Use the helper as a repair or migration step only. Prefer `shared-gateway-manifests/<env>/00-envoyproxy.yaml` for permanent configuration.
-
-Legacy annotation file support still exists in `bootstrap_envoy_prereqs.sh`, but it is no longer the preferred path for Envoy Gateway-managed Services. If you use it for a one-off repair, keep the annotation file in `key=value` format:
-
-```bash
-cat > accp-lb-annotations.env <<'EOF_ANNOTATIONS'
-service.beta.kubernetes.io/aws-load-balancer-access-log-enabled=true
-service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name=ven-{env}-lb-logging
-service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix=k8s-eg-{env}
-service.beta.kubernetes.io/aws-load-balancer-backend-protocol=ssl
-service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled=true
-service.beta.kubernetes.io/aws-load-balancer-internal=true
-service.beta.kubernetes.io/aws-load-balancer-security-groups=sg-xxxxxxxxxxx
-service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:xxxxxxxxxxx:certificate/xxxxxxxxxxx-xxxxx-xxxxx-xxxxx-xxxxxxxxxxx
-service.beta.kubernetes.io/aws-load-balancer-ssl-ports=443
-service.beta.kubernetes.io/aws-load-balancer-subnets=subnet-xxxxxxxxxxx,subnet-xxxxxxxxxxx
-service.beta.kubernetes.io/aws-load-balancer-type=nlb-ip
-service.beta.kubernetes.io/aws-load-balancer-target-group-attributes=preserve_client_ip.enabled=true
-EOF_ANNOTATIONS
-```
-
-Legacy annotation apply through the bootstrap script. The `{env}` placeholder is replaced with each target subenvironment:
-
-```bash
-./bootstrap_envoy_prereqs.sh \
-  --env-family accp \
-  --context accp \
-  --tls-crt ./tls.crt \
-  --tls-key ./tls.key \
-  --ca-crt ./ca.crt \
-  --annotation-file ./accp-lb-annotations.env \
-  --annotate-service 'envoy-gateway-system/envoy-gateway-{env}'
-```
-
-Adjust `envoy-gateway-system/envoy-gateway-{env}` to the real Service namespace and name in the cluster.
 
 TLS model reminder: if the AWS NLB terminates TLS with ACM and then connects to Envoy with SSL, the ACM and SSL annotations are expected. If Envoy Gateway should be the only TLS termination point, use NLB TCP pass-through style configuration instead. Keep this consistent with the Gateway listener, which uses `protocol: HTTPS` and `tls.mode: Terminate` in the standard example.
 
