@@ -2,7 +2,7 @@
 
 Expose one Kubernetes Service through Envoy Gateway by rendering Gateway API resources with a small, reusable Helm chart.
 
-This repository contains the chart, two Jenkins pipelines, a prerequisite bootstrap script, and a cluster validator for the Envoy Gateway rollout.
+This repository contains the chart, two Jenkins pipelines, manual prerequisite manifests, and a cluster validator for the Envoy Gateway rollout.
 
 ## Repository Contents
 
@@ -20,12 +20,11 @@ This repository contains the chart, two Jenkins pipelines, a prerequisite bootst
 | `envoy-single-service/templates/NOTES.txt` | Helm post-install notes with generated resource names and check commands. |
 | `Jenkinsfile` | Main selected-microservice deploy pipeline. Uses `helm upgrade --install`. |
 | `Jenkinsfile-bulk-upgrade` | Bulk upgrade pipeline for already-installed `envoy-single-service` releases. Uses `helm upgrade --reuse-values`. |
-| `bootstrap_envoy_prereqs.sh` | Optional root-level script to create Gateway namespaces, TLS Secrets, Gateways, backend CA Secrets, and optional Service annotations. |
 | `validate_envoy_resources.py` | Cluster validator for chart-managed HTTPRoutes, ReferenceGrants, BackendTLSPolicies, Gateways, Secrets, and Services. |
-| `shared-gateway-manifests/` | Shared Gateway-level policies that must be applied per environment when backend services need correct forwarded client IP headers. |
+| `Header-forwarding-manifests/` | Per-environment Gateway-level `EnvoyProxy`, `ClientTrafficPolicy`, and `EnvoyExtensionPolicy` manifests for NLB annotations and forwarded client IP headers. |
 | `microservices_dict.json` | Microservice catalog reference grouped by backend namespace prefix. |
 
-All command examples in this README assume you are running from the repository root unless.
+All command examples in this README assume you are running from the repository root unless stated otherwise.
 
 ## What The Chart Renders
 
@@ -45,7 +44,7 @@ The helpers derive these names and namespaces:
 | --- | --- |
 | Gateway namespace | `common-gw-<env>` |
 | Backend namespace | `<group>-<env>` |
-| Default Gateway name | Usually `gw-<env>` from the Jenkins pipelines or prerequisite script. |
+| Default Gateway name | Usually `gw-<env>` from the Jenkins pipelines and manual prerequisite manifests. |
 | Default backend Service name | `service-<microservice>` unless `svc` is set. |
 | Default path prefix | `/<microservice>` unless `pathPrefix` is set. |
 | Base resource name | `<group>-<microservice>-<env>`, truncated to fit Kubernetes name limits. |
@@ -131,7 +130,7 @@ Required cluster pieces:
 | Envoy Gateway | Envoy Gateway controller running and reconciling `GatewayClass envoy-gateway`. |
 | Gateway namespace | `common-gw-<env>`. |
 | Shared Gateway | `gw-<env>` in `common-gw-<env>` with HTTPS listener named `https`. |
-| Shared Gateway manifests | Apply `shared-gateway-manifests/<env>/01-clienttrafficpolicy.yaml` and `shared-gateway-manifests/<env>/02-envoyextensionpolicy.yaml` when services need trusted client IP forwarding headers. |
+| Header forwarding manifests | Apply `Header-forwarding-manifests/<env>/00-envoyproxy.yaml`, attach it to `gw-<env>`, then apply `01-clienttrafficpolicy.yaml` and `02-envoyextensionpolicy.yaml`. |
 | Gateway TLS Secret | `gateway-tls-secret` in `common-gw-<env>`. |
 | Backend namespace | `<group>-<env>`. |
 | Backend Service | Service exists in `<group>-<env>`, normally `service-<microservice>`. |
@@ -154,60 +153,73 @@ kubectl get crd gateways.gateway.networking.k8s.io
 kubectl get crd httproutes.gateway.networking.k8s.io
 kubectl get crd referencegrants.gateway.networking.k8s.io
 kubectl get crd backendtlspolicies.gateway.networking.k8s.io
+kubectl get crd envoyproxies.gateway.envoyproxy.io
+kubectl get crd clienttrafficpolicies.gateway.envoyproxy.io
+kubectl get crd envoyextensionpolicies.gateway.envoyproxy.io
 kubectl get crd backendtrafficpolicies.gateway.envoyproxy.io || true
 ```
 
-The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`.
+The `BackendTrafficPolicy` CRD is only required when `backendTrafficPolicy.create=true`. The `EnvoyProxy`, `ClientTrafficPolicy`, and `EnvoyExtensionPolicy` CRDs are required for the shared Gateway manifests.
 
-## Shared Gateway Manifests Prerequisite
+## Header Forwarding Manifests Prerequisite
 
-The `shared-gateway-manifests/` folder belongs to the shared Gateway layer, not to an individual microservice route. Apply these manifests before deploying routes that depend on correct client IP forwarding behavior.
+The `Header-forwarding-manifests/` folder belongs to the shared Gateway layer, not to an individual microservice route. Apply these manifests before deploying routes that depend on correct client IP forwarding behavior.
 
 Each supported environment has its own folder:
 
 ```text
-shared-gateway-manifests/dev/
-shared-gateway-manifests/devb/
-shared-gateway-manifests/devc/
-shared-gateway-manifests/intg/
-shared-gateway-manifests/intgb/
-shared-gateway-manifests/intgc/
-shared-gateway-manifests/accp/
-shared-gateway-manifests/accpb/
-shared-gateway-manifests/accpc/
-shared-gateway-manifests/proda/
-shared-gateway-manifests/prodb/
-shared-gateway-manifests/dr/
+Header-forwarding-manifests/dev/
+Header-forwarding-manifests/devb/
+Header-forwarding-manifests/devc/
+Header-forwarding-manifests/intg/
+Header-forwarding-manifests/intgb/
+Header-forwarding-manifests/intgc/
+Header-forwarding-manifests/accp/
+Header-forwarding-manifests/accpb/
+Header-forwarding-manifests/accpc/
+Header-forwarding-manifests/proda/
+Header-forwarding-manifests/prodb/
+Header-forwarding-manifests/dr/
 ```
 
-Each folder contains two Gateway-level policies:
+Each folder contains Gateway-level configuration for the shared Gateway:
 
 | File | Resource | Reason |
 | --- | --- | --- |
+| `00-envoyproxy.yaml` | `EnvoyProxy` | Controls generated Envoy NLB `Service` annotations through Envoy Gateway instead of manually editing the generated `Service`. |
 | `01-clienttrafficpolicy.yaml` | `ClientTrafficPolicy` | Tells Envoy Gateway to trust the incoming `X-Forwarded-For` header on the shared Gateway. Without this, backend services may see the Envoy/NLB/proxy address instead of the real caller chain. |
 | `02-envoyextensionpolicy.yaml` | `EnvoyExtensionPolicy` | Copies `X-Forwarded-For` into `X-Original-Forwarded-For` using a Gateway-wide Lua filter, so backend services can read the original forwarded chain from a stable header. |
 
 This is a prerequisite because `envoy-single-service` creates per-service resources such as `HTTPRoute`, `ReferenceGrant`, and optional backend policies. It does not configure Gateway-wide client IP handling. If these shared manifests are missing, the route can still work, but applications and logs that depend on original client IP headers can be wrong or incomplete.
 
+The `00-envoyproxy.yaml` files control the generated Envoy Gateway LoadBalancer Service annotations. Apply the `EnvoyProxy` resource, then attach it to the specific shared Gateway with `Gateway.spec.infrastructure.parametersRef`. Do not attach it at the `GatewayClass` level.
+
 Apply them in this order for the target environment:
 
 ```bash
-kubectl apply -f shared-gateway-manifests/<env>/01-clienttrafficpolicy.yaml
-kubectl apply -f shared-gateway-manifests/<env>/02-envoyextensionpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/<env>/00-envoyproxy.yaml
+kubectl -n common-gw-<env> patch gateway gw-<env> --type merge -p '{"spec":{"infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io","kind":"EnvoyProxy","name":"envoy-aws-nlb-service-<env>"}}}}'
+kubectl apply -f Header-forwarding-manifests/<env>/01-clienttrafficpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/<env>/02-envoyextensionpolicy.yaml
 ```
 
 Example for `accp`:
 
 ```bash
-kubectl apply -f shared-gateway-manifests/accp/01-clienttrafficpolicy.yaml
-kubectl apply -f shared-gateway-manifests/accp/02-envoyextensionpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/accp/00-envoyproxy.yaml
+kubectl -n common-gw-accp patch gateway gw-accp --type merge -p '{"spec":{"infrastructure":{"parametersRef":{"group":"gateway.envoyproxy.io","kind":"EnvoyProxy","name":"envoy-aws-nlb-service-accp"}}}}'
+kubectl apply -f Header-forwarding-manifests/accp/01-clienttrafficpolicy.yaml
+kubectl apply -f Header-forwarding-manifests/accp/02-envoyextensionpolicy.yaml
 ```
 
 Verify the policies:
 
 ```bash
+kubectl -n common-gw-<env> get envoyproxy envoy-aws-nlb-service-<env> -o yaml
+kubectl -n common-gw-<env> get gateway gw-<env> -o yaml
 kubectl -n common-gw-<env> get clienttrafficpolicy trust-all-xff -o yaml
 kubectl -n common-gw-<env> get envoyextensionpolicy copy-xff-to-xoff -o yaml
+kubectl get svc -n envoy-system | grep "common-gw-<env>"
 ```
 
 After applying them, test a routed URL and confirm the backend receives both:
@@ -219,9 +231,13 @@ X-Original-Forwarded-For
 
 Important: these manifests target a specific shared Gateway name and namespace, usually `gw-<env>` in `common-gw-<env>`. If your Gateway name is customized, update the `targetRefs.name` value before applying.
 
+If the generated Envoy Service already exists before attaching `00-envoyproxy.yaml`, Envoy Gateway should reconcile the Service annotations after the Gateway is patched. If it does not, check the Gateway status and Envoy Gateway controller logs before manually editing the Service.
+
 ## Prerequisite Bootstrap Script
 
 The root script can create or refresh the common Gateway prerequisites for an environment family.
+
+This script does not apply the `shared-gateway-manifests/<env>/` files. Run the bootstrap script first when namespaces, TLS Secrets, Gateways, or backend CA Secrets are missing, then apply the shared Gateway manifests for NLB annotations and forwarded header behavior.
 
 Dry-run first:
 
@@ -344,11 +360,36 @@ kubectl -n lifecad-services-accpb create secret generic lifecad-backend-ca --fro
 kubectl -n portal-services-accpb create secret generic portal-backend-ca --from-file=ca.crt=./ca.crt --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-Repeat the same backend CA pattern for `accpb` and `accpc` if those namespaces exist.
+Repeat the same backend CA pattern for the other subenvironments in the family if those namespaces exist.
 
 ## AWS LoadBalancer Annotations
 
-AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service.
+AWS LoadBalancer annotations belong on the Kubernetes `Service` that exposes Envoy Gateway, not on the `Gateway`, `HTTPRoute`, or backend application Service. In this repo, the normal source of truth is the per-environment `EnvoyProxy` manifest:
+
+```text
+shared-gateway-manifests/<env>/00-envoyproxy.yaml
+```
+
+Attach that `EnvoyProxy` to the shared Gateway with `spec.infrastructure.parametersRef`. Envoy Gateway then applies the annotations to the generated Service in `envoy-system`.
+
+Required annotation set used by the shared manifests:
+
+```text
+service.beta.kubernetes.io/aws-load-balancer-access-log-enabled
+service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-name
+service.beta.kubernetes.io/aws-load-balancer-access-log-s3-bucket-prefix
+service.beta.kubernetes.io/aws-load-balancer-backend-protocol
+service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled
+service.beta.kubernetes.io/aws-load-balancer-internal
+service.beta.kubernetes.io/aws-load-balancer-security-groups
+service.beta.kubernetes.io/aws-load-balancer-ssl-cert
+service.beta.kubernetes.io/aws-load-balancer-ssl-ports
+service.beta.kubernetes.io/aws-load-balancer-subnets
+service.beta.kubernetes.io/aws-load-balancer-type
+service.beta.kubernetes.io/aws-load-balancer-target-group-attributes
+```
+
+`service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true` is required for preserving the direct client IP that reaches the NLB target. The `ClientTrafficPolicy` and `EnvoyExtensionPolicy` then make that forwarded chain available to applications through `X-Forwarded-For` and `X-Original-Forwarded-For`.
 
 Find the Service first:
 
@@ -356,7 +397,22 @@ Find the Service first:
 kubectl get svc -A | grep -E 'LoadBalancer|envoy|gateway'
 ```
 
-Example annotation file for the bootstrap script:
+Temporary repair fallback for already-generated Services:
+
+```bash
+./annotate_envoy_services_preserve_client_ip.sh --dry-run
+./annotate_envoy_services_preserve_client_ip.sh
+```
+
+That helper scans `envoy-system`, selects only Services that already have the standard AWS NLB annotations used by this repo, and adds or updates:
+
+```text
+service.beta.kubernetes.io/aws-load-balancer-target-group-attributes=preserve_client_ip.enabled=true
+```
+
+Use the helper as a repair or migration step only. Prefer `shared-gateway-manifests/<env>/00-envoyproxy.yaml` for permanent configuration.
+
+Legacy annotation file support still exists in `bootstrap_envoy_prereqs.sh`, but it is no longer the preferred path for Envoy Gateway-managed Services. If you use it for a one-off repair, keep the annotation file in `key=value` format:
 
 ```bash
 cat > accp-lb-annotations.env <<'EOF_ANNOTATIONS'
@@ -371,11 +427,11 @@ service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:xxxx
 service.beta.kubernetes.io/aws-load-balancer-ssl-ports=443
 service.beta.kubernetes.io/aws-load-balancer-subnets=subnet-xxxxxxxxxxx,subnet-xxxxxxxxxxx
 service.beta.kubernetes.io/aws-load-balancer-type=nlb-ip
-service.beta.kubernetes.io/aws-load-balancer-target-group-attributes: preserve_client_ip.enabled=true
+service.beta.kubernetes.io/aws-load-balancer-target-group-attributes=preserve_client_ip.enabled=true
 EOF_ANNOTATIONS
 ```
 
-Apply annotations through the script. The `{env}` placeholder is replaced with each target subenvironment:
+Legacy annotation apply through the bootstrap script. The `{env}` placeholder is replaced with each target subenvironment:
 
 ```bash
 ./bootstrap_envoy_prereqs.sh \
@@ -652,6 +708,9 @@ Run this before deploying routes into a subenvironment family:
 for env in accp accpb accpc; do
   kubectl -n "common-gw-${env}" get secret gateway-tls-secret
   kubectl -n "common-gw-${env}" get gateway "gw-${env}"
+  kubectl -n "common-gw-${env}" get envoyproxy "envoy-aws-nlb-service-${env}"
+  kubectl -n "common-gw-${env}" get clienttrafficpolicy trust-all-xff
+  kubectl -n "common-gw-${env}" get envoyextensionpolicy copy-xff-to-xoff
   kubectl -n "common-gw-${env}" describe gateway "gw-${env}" | grep -E 'Accepted|Programmed|ResolvedRefs' || true
 done
 ```
